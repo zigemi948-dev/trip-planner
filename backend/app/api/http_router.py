@@ -10,7 +10,9 @@ from app.graph.state import (
     PlanningJobSummary,
     ReplanRequest,
     TripState,
+    WorkflowTopology,
 )
+from app.graph.edges import workflow_topology
 from app.graph.workflow import run_replan_workflow, run_trip_workflow
 from app.services.export_service import persist_export_payload, render_export_payload
 from app.services.job_service import job_store
@@ -22,6 +24,12 @@ router = APIRouter(tags=["trips"])
 def plan_trip(intent: IntentConstraints) -> TripState:
     """Plan a trip from a normalized request payload."""
     return run_trip_workflow(intent)
+
+
+@router.get("/trips/workflow/topology", response_model=WorkflowTopology)
+def get_workflow_topology() -> WorkflowTopology:
+    """Return the deterministic Map-Compute-Reduce workflow topology."""
+    return workflow_topology()
 
 
 @router.post("/trips/intent/parse", response_model=IntentConstraints)

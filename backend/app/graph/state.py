@@ -103,6 +103,29 @@ class IntegrationProbeResponse(BaseModel):
     results: list[IntegrationProbeResult] = Field(default_factory=list)
 
 
+class WorkflowTopologyNode(BaseModel):
+    """One graph node exposed for workflow topology diagnostics."""
+
+    name: str
+    phase: str
+    description: str
+
+
+class WorkflowTopologyEdge(BaseModel):
+    """One directed or conditional edge in the workflow topology."""
+
+    source: str
+    target: str
+    condition: str = "always"
+
+
+class WorkflowTopology(BaseModel):
+    """Map-Compute-Reduce graph shape for UI and diagnostics."""
+
+    nodes: list[WorkflowTopologyNode] = Field(default_factory=list)
+    edges: list[WorkflowTopologyEdge] = Field(default_factory=list)
+
+
 class WeatherConstraint(BaseModel):
     """Weather or operating constraint that can block some POI categories."""
 
@@ -250,6 +273,9 @@ class GraphControls(BaseModel):
     """Workflow cursor and event stream for UI/debug visibility."""
 
     current_status: GraphStatus = GraphStatus.created
+    current_node: str | None = None
+    current_phase: str | None = None
+    repair_attempts: int = 0
     edit_trigger: str | None = None
     events: list[dict[str, Any]] = Field(default_factory=list)
 

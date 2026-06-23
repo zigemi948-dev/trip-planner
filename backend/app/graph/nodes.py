@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable
+
 from app.agents.planner_agent import render_narrative
 from app.algorithms.budget_evaluator import evaluate_budget
 from app.algorithms.budget_pruner import remove_budget_candidate
@@ -8,12 +11,42 @@ from app.services.matrix_service import build_time_dependent_matrix_with_source
 from app.services.provider_adapters import provider_registry
 
 
+def _run_map_agent(name: str, fn: Callable[[], Any]) -> tuple[str, Any]:
+    return name, fn()
+
+
 def map_agents_node(state: TripState) -> TripState:
-    """Run all Map-stage agents and store their normalized outputs."""
-    state.financial_context = provider_registry.finance.context(state.intent_constraints)
-    state.spatial_graph_data.hotel_anchor = provider_registry.hotels.resolve_anchor(state.intent_constraints)
-    state.spatial_graph_data.poi_candidates = provider_registry.attractions.search(state.intent_constraints)
-    state.spatial_graph_data.weather_constraints = provider_registry.weather.constraints(state.intent_constraints)
+    """Run all Map-stage agents and store their normalized outputs.
+
+    The PRD defines this stage as parallel feature retrieval. Providers own
+    fallback behavior; this node only joins their normalized outputs.
+    """
+    agent_calls: dict[str, Callable[[], Any]] = {
+        "finance_agent": lambda: provider_registry.finance.context(state.intent_constraints),
+        "hotel_agent": lambda: provider_registry.hotels.resolve_anchor(state.intent_constraints),
+        "attraction_agent": lambda: provider_registry.attractions.search(state.intent_constraints),
+        "weather_agent": lambda: provider_registry.weather.constraints(state.intent_constraints),
+    }
+    results: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=len(agent_calls)) as executor:
+        futures = [
+            executor.submit(_run_map_agent, name, fn)
+            for name, fn in agent_calls.items()
+        ]
+        for future in futures:
+            name, value = future.result()
+            results[name] = value
+            payload: dict[str, Any] = {}
+            if isinstance(value, list):
+                payload["count"] = len(value)
+            elif hasattr(value, "model_dump"):
+                payload["type"] = value.__class__.__name__
+            state.emit("map_agent_complete", {"agent": name, **payload})
+
+    state.financial_context = results["finance_agent"]
+    state.spatial_graph_data.hotel_anchor = results["hotel_agent"]
+    state.spatial_graph_data.poi_candidates = results["attraction_agent"]
+    state.spatial_graph_data.weather_constraints = results["weather_agent"]
     poi_source = "amap" if any(poi.id.startswith("amap_") for poi in state.spatial_graph_data.poi_candidates) else "local"
     local_hotel_name = f"{state.intent_constraints.destination} Central Hotel"
     hotel_source = "amap" if (
@@ -59,6 +92,7 @@ def vrp_solver_node(state: TripState) -> TripState:
         days=state.intent_constraints.days,
         matrix=state.spatial_graph_data.time_dependent_tensor,
         day_start=state.intent_constraints.time_window_baseline[0],
+        day_end=state.intent_constraints.time_window_baseline[1],
         weather_constraints=state.spatial_graph_data.weather_constraints,
     )
     state.routing_solution.optimized_route = routes

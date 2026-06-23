@@ -1,6 +1,12 @@
 from app.algorithms.matrix_builder import build_fallback_matrix
-from app.graph.state import FinancialContext, POICandidate
-from app.services.amap_service import AmapUnavailableError, build_amap_matrix, resolve_hotel, search_pois
+from app.graph.state import FinancialContext, POICandidate, WeatherConstraint
+from app.services.amap_service import (
+    AmapUnavailableError,
+    build_amap_matrix,
+    fetch_weather_constraints,
+    resolve_hotel,
+    search_pois,
+)
 
 
 def distance_matrix_tool(nodes: list[POICandidate], financial: FinancialContext):
@@ -19,3 +25,8 @@ def poi_search_tool(city: str, keywords: list[str], limit: int = 10) -> list[POI
 def hotel_anchor_tool(city: str) -> POICandidate:
     """Return an Amap hotel anchor for MCP-style provider calls."""
     return resolve_hotel(city)
+
+
+def weather_constraints_tool(city: str) -> list[WeatherConstraint]:
+    """Return Amap weather-derived solver constraints."""
+    return fetch_weather_constraints(city)

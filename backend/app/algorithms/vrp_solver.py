@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import permutations
 
 from app.algorithms.clustering import cluster_by_day
 from app.algorithms.geometry import attach_route_geometry
 from app.algorithms.matrix_builder import matrix_key
+from app.core.config import settings
 from app.graph.state import (
     DayRoute,
     MatrixEdge,
@@ -16,6 +19,22 @@ from app.graph.state import (
 
 
 TIME_FORMAT = "%H:%M"
+MAX_EXACT_PERMUTATION_SIZE = 7
+MAX_MUTATED_SEQUENCES = 80
+TIME_PENALTY_WEIGHT = 1 / 600
+COST_PENALTY_WEIGHT = 1 / 500
+
+
+@dataclass(frozen=True)
+class RouteCandidate:
+    """One evaluated day-level TD-VRPTW candidate."""
+
+    stops: list[RouteStop]
+    total_minutes: int
+    total_cost: float
+    utility: float
+    skipped_count: int
+    fitness_score: float
 
 
 def add_minutes(time_text: str, minutes: int) -> str:
@@ -35,10 +54,23 @@ def hour_from_clock(time_text: str) -> int:
     return datetime.strptime(time_text, TIME_FORMAT).hour
 
 
+def day_end_from_start(day_start: str, max_minutes: int | None = None) -> str:
+    """Return the default daily hard horizon from the configured capacity."""
+    return add_minutes(day_start, max_minutes or settings.max_day_minutes)
+
+
 def _within_window(start: str, end: str, window: tuple[str, str]) -> bool:
     return minutes_since_midnight(start) >= minutes_since_midnight(window[0]) and (
         minutes_since_midnight(end) <= minutes_since_midnight(window[1])
     )
+
+
+def _before(time_text: str, other: str) -> bool:
+    return minutes_since_midnight(time_text) < minutes_since_midnight(other)
+
+
+def _after(time_text: str, other: str) -> bool:
+    return minutes_since_midnight(time_text) > minutes_since_midnight(other)
 
 
 def _overlaps_window(start: str, end: str, window: tuple[str, str]) -> bool:
@@ -116,81 +148,235 @@ def _candidate_score(
     return (travel_minutes + infeasible_penalty, cost, -poi.utility)
 
 
+def _sequence_key(sequence: list[POICandidate]) -> tuple[str, ...]:
+    return tuple(poi.id for poi in sequence)
+
+
+def _greedy_sequence(
+    hotel: POICandidate,
+    pois: list[POICandidate],
+    matrix: dict[str, MatrixEdge],
+    day_start: str,
+    constraints: list[WeatherConstraint],
+) -> list[POICandidate]:
+    remaining = list(pois)
+    current = hotel
+    clock = day_start
+    ordered: list[POICandidate] = []
+    while remaining:
+        poi = _next_best(current, remaining, matrix, clock, constraints)
+        edge = _edge(matrix, current.id, poi.id, clock)
+        clock = add_minutes(clock, (edge.duration_minutes if edge else 0) + poi.visit_duration_minutes)
+        ordered.append(poi)
+        remaining.remove(poi)
+        current = poi
+    return ordered
+
+
+def _candidate_sequences(
+    hotel: POICandidate,
+    pois: list[POICandidate],
+    matrix: dict[str, MatrixEdge],
+    day_start: str,
+    constraints: list[WeatherConstraint],
+) -> list[list[POICandidate]]:
+    """Build a compact deterministic route population for NSGA-II-style scoring."""
+    if not pois:
+        return []
+
+    base_sequences = [
+        _greedy_sequence(hotel, pois, matrix, day_start, constraints),
+        sorted(pois, key=lambda poi: (-poi.utility, poi.fixed_cost, poi.coordinates.lng)),
+        sorted(pois, key=lambda poi: (minutes_since_midnight(poi.opening_window[0]), -poi.utility)),
+        sorted(pois, key=lambda poi: (poi.coordinates.lng, poi.coordinates.lat)),
+        sorted(pois, key=lambda poi: (-poi.coordinates.lng, poi.coordinates.lat)),
+    ]
+
+    sequences: list[list[POICandidate]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def add_sequence(sequence: list[POICandidate]) -> None:
+        key = _sequence_key(sequence)
+        if key not in seen:
+            seen.add(key)
+            sequences.append(sequence)
+
+    for sequence in base_sequences:
+        add_sequence(list(sequence))
+
+    if len(pois) <= MAX_EXACT_PERMUTATION_SIZE:
+        for sequence in permutations(pois):
+            add_sequence(list(sequence))
+    else:
+        for sequence in list(sequences):
+            if len(sequences) >= MAX_MUTATED_SEQUENCES:
+                break
+            for index in range(len(sequence) - 1):
+                mutated = list(sequence)
+                mutated[index], mutated[index + 1] = mutated[index + 1], mutated[index]
+                add_sequence(mutated)
+                if len(sequences) >= MAX_MUTATED_SEQUENCES:
+                    break
+
+    return sequences[:MAX_MUTATED_SEQUENCES]
+
+
+def _evaluate_sequence(
+    hotel: POICandidate,
+    sequence: list[POICandidate],
+    matrix: dict[str, MatrixEdge],
+    day_start: str,
+    day_end: str,
+    constraints: list[WeatherConstraint],
+) -> RouteCandidate:
+    current = hotel
+    clock = day_start
+    stops: list[RouteStop] = []
+    total_cost = 0.0
+    skipped_count = 0
+
+    for poi in sequence:
+        inbound = _edge(matrix, current.id, poi.id, clock)
+        travel_minutes = inbound.duration_minutes if inbound else 0
+        arrival = add_minutes(clock, travel_minutes)
+        if _before(arrival, poi.opening_window[0]):
+            arrival = poi.opening_window[0]
+        departure = add_minutes(arrival, poi.visit_duration_minutes)
+
+        if (
+            not _within_window(arrival, departure, poi.opening_window)
+            or _after(departure, day_end)
+            or _violates_weather(poi, arrival, departure, constraints)
+        ):
+            skipped_count += 1
+            continue
+
+        stops.append(
+            RouteStop(
+                poi=poi,
+                day=1,
+                arrival_time=arrival,
+                departure_time=departure,
+                inbound_mode=inbound.mode if inbound else TransportMode.walking,
+                inbound_cost=inbound.cost if inbound else 0,
+                inbound_distance_km=inbound.distance_km if inbound else 0,
+            )
+        )
+        total_cost += poi.fixed_cost + (inbound.cost if inbound else 0)
+        current = poi
+        clock = departure
+
+    total_minutes = max(0, minutes_since_midnight(clock) - minutes_since_midnight(day_start)) if stops else 0
+    utility = sum(stop.poi.utility for stop in stops)
+    fitness = (
+        utility
+        - total_minutes * TIME_PENALTY_WEIGHT
+        - total_cost * COST_PENALTY_WEIGHT
+        - skipped_count * 0.75
+    )
+    return RouteCandidate(
+        stops=stops,
+        total_minutes=total_minutes,
+        total_cost=round(total_cost, 2),
+        utility=utility,
+        skipped_count=skipped_count,
+        fitness_score=round(fitness, 3),
+    )
+
+
+def _dominates(left: RouteCandidate, right: RouteCandidate) -> bool:
+    """Return true when left Pareto-dominates right."""
+    no_worse = (
+        left.utility >= right.utility
+        and left.total_minutes <= right.total_minutes
+        and left.total_cost <= right.total_cost
+        and left.skipped_count <= right.skipped_count
+    )
+    strictly_better = (
+        left.utility > right.utility
+        or left.total_minutes < right.total_minutes
+        or left.total_cost < right.total_cost
+        or left.skipped_count < right.skipped_count
+    )
+    return no_worse and strictly_better
+
+
+def _pareto_front(candidates: list[RouteCandidate]) -> list[RouteCandidate]:
+    return [
+        candidate
+        for candidate in candidates
+        if not any(other is not candidate and _dominates(other, candidate) for other in candidates)
+    ]
+
+
+def _solve_day_route(
+    day: int,
+    hotel: POICandidate,
+    cluster: list[POICandidate],
+    matrix: dict[str, MatrixEdge],
+    day_start: str,
+    day_end: str,
+    constraints: list[WeatherConstraint],
+) -> DayRoute:
+    population = [
+        _evaluate_sequence(hotel, sequence, matrix, day_start, day_end, constraints)
+        for sequence in _candidate_sequences(hotel, cluster, matrix, day_start, constraints)
+    ]
+    if not population:
+        route = DayRoute(day=day, stops=[], total_minutes=0, total_cost=0, fitness_score=0)
+        return attach_route_geometry(hotel, route)
+
+    front = _pareto_front(population)
+    best = max(
+        front,
+        key=lambda candidate: (
+            candidate.fitness_score,
+            len(candidate.stops),
+            candidate.utility,
+            -candidate.total_minutes,
+            -candidate.total_cost,
+        ),
+    )
+    route = DayRoute(
+        day=day,
+        stops=[stop.model_copy(update={"day": day}) for stop in best.stops],
+        total_minutes=best.total_minutes,
+        total_cost=best.total_cost,
+        fitness_score=best.fitness_score,
+    )
+    return attach_route_geometry(hotel, route)
+
+
 def solve_routes(
     hotel: POICandidate,
     pois: list[POICandidate],
     days: int,
     matrix: dict[str, MatrixEdge],
     day_start: str = "09:00",
+    day_end: str | None = None,
     weather_constraints: list[WeatherConstraint] | None = None,
 ) -> list[DayRoute]:
-    """Solve a deterministic nearest-neighbor route for each clustered day.
+    """Solve capacity-clustered TD-VRPTW routes with multi-objective search.
 
-    This is intentionally simple and replaceable: the surrounding workflow and
-    state schema are stable, while the internals can later become NSGA-II.
+    Phase one clusters POIs by space and day capacity. Phase two evaluates a
+    compact deterministic population per day and chooses a Pareto-efficient
+    route under time-window and weather constraints.
     """
     clusters = cluster_by_day(pois, days)
-    routes: list[DayRoute] = []
     constraints = weather_constraints or []
-
-    for day_index, cluster in enumerate(clusters, start=1):
-        remaining = list(cluster)
-        current = hotel
-        clock = day_start
-        total_minutes = 0
-        total_cost = 0.0
-        stops: list[RouteStop] = []
-
-        while remaining:
-            # Walk the route greedily from the hotel/previous stop through the
-            # closest candidate in the time-dependent matrix.
-            poi = _next_best(current, remaining, matrix, clock, constraints)
-            inbound = _edge(matrix, current.id, poi.id, clock)
-            travel_minutes = inbound.duration_minutes if inbound else 0
-            arrival = add_minutes(clock, travel_minutes)
-            departure = add_minutes(arrival, poi.visit_duration_minutes)
-            feasible = is_feasible_visit(poi, arrival, departure, constraints)
-
-            stops.append(
-                RouteStop(
-                    poi=poi,
-                    day=day_index,
-                    arrival_time=arrival,
-                    departure_time=departure,
-                    inbound_mode=inbound.mode if inbound else TransportMode.walking,
-                    inbound_cost=inbound.cost if inbound else 0,
-                    inbound_distance_km=inbound.distance_km if inbound else 0,
-                )
-            )
-            total_minutes += travel_minutes + poi.visit_duration_minutes
-            total_cost += poi.fixed_cost + (inbound.cost if inbound else 0)
-            clock = departure
-            current = poi
-            remaining.remove(poi)
-            if not feasible:
-                total_cost += 0
-
-        infeasible_count = sum(
-            1
-            for stop in stops
-            if not is_feasible_visit(
-                stop.poi,
-                stop.arrival_time,
-                stop.departure_time,
-                constraints,
-            )
-        )
-        fitness = sum(stop.poi.utility for stop in stops) - total_minutes / 600 - total_cost / 500 - infeasible_count * 5
-        route = DayRoute(
+    horizon = day_end or day_end_from_start(day_start)
+    return [
+        _solve_day_route(
             day=day_index,
-            stops=stops,
-            total_minutes=total_minutes,
-            total_cost=round(total_cost, 2),
-            fitness_score=round(fitness, 3),
+            hotel=hotel,
+            cluster=cluster,
+            matrix=matrix,
+            day_start=day_start,
+            day_end=horizon,
+            constraints=constraints,
         )
-        routes.append(attach_route_geometry(hotel, route))
-
-    return routes
+        for day_index, cluster in enumerate(clusters, start=1)
+    ]
 
 
 def cheapest_insertion(
@@ -199,6 +385,7 @@ def cheapest_insertion(
     hotel: POICandidate,
     matrix: dict[str, MatrixEdge],
     day_start: str = "09:00",
+    day_end: str | None = None,
     weather_constraints: list[WeatherConstraint] | None = None,
 ) -> DayRoute:
     """Insert one POI at the position with the smallest transport cost delta."""
@@ -232,5 +419,6 @@ def cheapest_insertion(
         1,
         matrix,
         day_start,
+        day_end=day_end,
         weather_constraints=weather_constraints,
     )[0]

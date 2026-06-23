@@ -7,7 +7,7 @@ from urllib.request import urlopen
 
 from app.algorithms.matrix_builder import build_fallback_matrix, matrix_key, traffic_multiplier
 from app.core.config import settings
-from app.graph.state import Coordinates, FinancialContext, MatrixEdge, POICandidate, TransportMode
+from app.graph.state import Coordinates, FinancialContext, MatrixEdge, POICandidate, TransportMode, WeatherConstraint
 
 
 class AmapUnavailableError(RuntimeError):
@@ -68,6 +68,53 @@ def resolve_hotel(city: str) -> POICandidate:
             "indoor": True,
         }
     )
+
+
+def fetch_weather_constraints(city: str) -> list[WeatherConstraint]:
+    """Fetch Amap live weather and convert it into solver constraints."""
+    if not amap_is_enabled():
+        raise AmapUnavailableError("Amap provider is not enabled")
+
+    payload = _request_json(
+        "/weather/weatherInfo",
+        {
+            "city": city,
+            "extensions": "base",
+        },
+    )
+    lives = payload.get("lives") or []
+    if not lives:
+        raise AmapUnavailableError("Amap returned no weather lives")
+    live = lives[0]
+    weather_text = str(live.get("weather") or "")
+    temperature_text = str(live.get("temperature") or "")
+    constraints: list[WeatherConstraint] = []
+
+    if any(token in weather_text for token in ("雨", "雪", "雷", "storm", "rain", "snow")):
+        constraints.append(
+            WeatherConstraint(
+                time_window=("09:00", "18:00"),
+                rule="avoid_outdoor",
+                block_outdoor=True,
+                reason=f"amap_weather:{weather_text}",
+            )
+        )
+
+    try:
+        temperature = float(temperature_text)
+    except ValueError:
+        temperature = 0
+    if temperature >= 34:
+        constraints.append(
+            WeatherConstraint(
+                time_window=("13:00", "16:00"),
+                rule="avoid_outdoor",
+                block_outdoor=True,
+                reason=f"amap_heat:{temperature_text}",
+            )
+        )
+
+    return constraints
 
 
 def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) -> dict[str, MatrixEdge]:

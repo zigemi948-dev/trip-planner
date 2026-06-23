@@ -1,4 +1,6 @@
+from app.core.config import settings
 from app.graph.state import Coordinates, IntentConstraints, POICandidate
+from app.services.mcp_client import MCPToolError, call_tool
 
 
 DEMO_POIS = [
@@ -13,9 +15,23 @@ DEMO_POIS = [
 def search_attractions(intent: IntentConstraints) -> list[POICandidate]:
     """Return candidate POIs for the requested destination.
 
-    The current implementation is a deterministic demo source. It preserves the
-    same shape expected from a future Amap MCP-backed attraction search agent.
+    Amap mode uses the MCP tool boundary. The deterministic demo source remains
+    the local fallback when the remote provider is unavailable.
     """
+    if settings.provider_mode.lower() == "amap":
+        try:
+            payload = call_tool(
+                "amap_poi_search",
+                {
+                    "city": intent.destination,
+                    "keywords": intent.preferences or ["attraction"],
+                    "limit": 10,
+                },
+            )
+            return [POICandidate.model_validate(item) for item in payload or []]
+        except (MCPToolError, ValueError, TypeError):
+            pass
+
     return [
         POICandidate(
             id=poi_id,

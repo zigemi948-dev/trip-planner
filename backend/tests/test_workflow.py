@@ -4,17 +4,21 @@ from uuid import uuid4
 import pytest
 
 from app.agents.intent_agent import parse_trip_intent
+from app.algorithms.clustering import cluster_by_day
 from app.algorithms.matrix_builder import build_fallback_matrix, matrix_key
+from app.algorithms.matrix_builder import choose_mode
 from app.algorithms.geometry import simplify_geometry
 from app.algorithms.geo import haversine_km
+from app.algorithms.vrp_solver import solve_routes
 from app.core.config import BACKEND_ROOT, resolve_backend_path
-from app.graph.state import Coordinates, ExportRequest, FinancialContext, IntentConstraints, POICandidate, ReplanRequest
+from app.graph.state import Coordinates, ExportRequest, FinancialContext, IntentConstraints, POICandidate, ReplanRequest, TransportMode
 from app.graph import nodes as workflow_nodes
 from app.services import provider_adapters
 from app.services.amap_service import AmapUnavailableError, _poi_from_amap
 from app.graph.workflow import run_replan_workflow, run_trip_workflow
 from app.services.export_service import persist_export_payload, render_export_payload
 from app.services.job_service import JobStore
+from app.services.mcp_client import MCPToolError
 
 TEST_OUTPUT_DIR = BACKEND_ROOT / "test-output"
 
@@ -68,6 +72,74 @@ def test_fallback_matrix_contains_time_dependent_hour_slices():
     assert peak.duration_minutes >= off_peak.duration_minutes
 
 
+def test_mode_choice_downgrades_expensive_driving_to_transit():
+    mode = choose_mode(distance_km=5, driving_cost=13, transit_cost=4, hour=11)
+
+    assert mode == TransportMode.transit
+
+
+def test_capacity_clustering_respects_daily_visit_and_commute_demand():
+    pois = [
+        POICandidate(
+            id=f"poi_{index}",
+            name=f"POI {index}",
+            category="museum",
+            coordinates=Coordinates(lat=31.20 + index * 0.01, lng=121.40 + index * 0.01),
+            visit_duration_minutes=60,
+            utility=8 - index * 0.1,
+        )
+        for index in range(4)
+    ]
+
+    clusters = cluster_by_day(pois, days=2, max_day_minutes=180)
+
+    assert len(clusters) == 2
+    assert all(sum(poi.visit_duration_minutes + 30 for poi in cluster) <= 180 for cluster in clusters)
+
+
+def test_td_vrptw_solver_waits_for_opening_and_skips_day_end_violations():
+    hotel = POICandidate(
+        id="hotel",
+        name="Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.2300, lng=121.4700),
+        visit_duration_minutes=0,
+    )
+    morning = POICandidate(
+        id="morning",
+        name="Morning Museum",
+        category="museum",
+        coordinates=Coordinates(lat=31.2301, lng=121.4701),
+        visit_duration_minutes=60,
+        utility=8,
+        opening_window=("10:00", "12:00"),
+        indoor=True,
+    )
+    impossible = POICandidate(
+        id="impossible",
+        name="Late Gallery",
+        category="gallery",
+        coordinates=Coordinates(lat=31.2302, lng=121.4702),
+        visit_duration_minutes=120,
+        utility=10,
+        opening_window=("11:30", "12:00"),
+        indoor=True,
+    )
+    matrix = build_fallback_matrix([hotel, morning, impossible], FinancialContext())
+
+    route = solve_routes(
+        hotel=hotel,
+        pois=[morning, impossible],
+        days=1,
+        matrix=matrix,
+        day_start="09:00",
+        day_end="12:00",
+    )[0]
+
+    assert [stop.poi.name for stop in route.stops] == ["Morning Museum"]
+    assert route.stops[0].arrival_time == "10:00"
+
+
 def test_rule_intent_parser_extracts_chinese_trip_constraints():
     intent = parse_trip_intent("上海两天，预算600元，想看博物馆和美食，9:00-18:00")
 
@@ -107,10 +179,11 @@ def test_amap_poi_payload_maps_to_candidate():
 
 
 def test_amap_provider_falls_back_to_local_when_unavailable(monkeypatch: pytest.MonkeyPatch):
-    def fail_search(*args, **kwargs):
-        raise AmapUnavailableError("offline")
+    def fail_tool(*args, **kwargs):
+        raise MCPToolError("offline")
 
-    monkeypatch.setattr(provider_adapters, "search_pois", fail_search)
+    monkeypatch.setattr("app.agents.attraction_agent.call_tool", fail_tool)
+    monkeypatch.setattr("app.agents.attraction_agent.settings.provider_mode", "amap")
     provider = provider_adapters.AmapAttractionProvider()
 
     pois = provider.search(
@@ -142,7 +215,29 @@ def test_workflow_returns_rendered_solution():
     assert any(event["event"] == "provider_status" for event in state.graph_controls.events)
     matrix_events = [event for event in state.graph_controls.events if event["event"] == "matrix_ready"]
     assert matrix_events
-    assert matrix_events[-1]["payload"]["source"] in {"fallback", "amap", "cache:fallback", "cache:amap"}
+    assert matrix_events[-1]["payload"]["source"] in {
+        "fallback",
+        "amap",
+        "amap:mcp",
+        "cache:fallback",
+        "cache:amap",
+        "cache:amap:mcp",
+    }
+    assert state.graph_controls.current_phase == "Reduce"
+    assert state.graph_controls.current_node == "planner_reduce"
+    assert {event["payload"]["agent"] for event in state.graph_controls.events if event["event"] == "map_agent_complete"} == {
+        "finance_agent",
+        "hotel_agent",
+        "attraction_agent",
+        "weather_agent",
+    }
+    completed_nodes = [
+        event["payload"]["node"]
+        for event in state.graph_controls.events
+        if event["event"] == "node_completed"
+    ]
+    assert completed_nodes[:4] == ["map_agents", "matrix_builder", "vrp_solver", "budget_evaluator"]
+    assert completed_nodes[-2:] == ["context_compressor", "planner_reduce"]
 
 
 def test_replan_inserts_new_poi_into_target_day():
@@ -253,6 +348,11 @@ def test_budget_repair_prunes_when_budget_is_tight():
 
     assert state.routing_solution.repair_actions
     assert state.routing_solution.budget_breakdown.total_cost <= 260
+    assert state.graph_controls.repair_attempts >= 1
+    assert any(
+        event["event"] == "edge_taken" and event["payload"]["target"] == "budget_repair"
+        for event in state.graph_controls.events
+    )
 
 
 def test_budget_repair_can_prune_more_than_three_candidates(monkeypatch: pytest.MonkeyPatch):
@@ -409,6 +509,23 @@ def test_capabilities_endpoint_when_fastapi_is_available():
     assert "amap_enabled" in payload
     assert "llm_enabled" in payload
     assert "api_key" not in payload
+
+
+def test_workflow_topology_endpoint_when_fastapi_is_available():
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    response = client.get("/api/trips/workflow/topology")
+
+    assert response.status_code == 200
+    payload = response.json()
+    node_names = {node["name"] for node in payload["nodes"]}
+    assert {"map_agents", "matrix_builder", "vrp_solver", "budget_evaluator", "planner_reduce"} <= node_names
+    assert any(edge["target"] == "budget_repair" for edge in payload["edges"])
 
 
 def test_integration_probe_endpoint_when_fastapi_is_available():

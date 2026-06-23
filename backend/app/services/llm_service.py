@@ -16,6 +16,14 @@ def llm_is_enabled() -> bool:
     return settings.llm_enabled and bool(settings.llm_api_key)
 
 
+def chat_completions_url() -> str:
+    """Return the concrete OpenAI-compatible chat completions endpoint."""
+    base_url = settings.llm_base_url.rstrip("/")
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
 def complete_text(system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
     """Call an OpenAI-compatible chat completion endpoint and return text."""
     if not llm_is_enabled():
@@ -30,7 +38,7 @@ def complete_text(system_prompt: str, user_prompt: str, temperature: float = 0.2
         ],
     }
     request = Request(
-        settings.llm_base_url,
+        chat_completions_url(),
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {settings.llm_api_key}",

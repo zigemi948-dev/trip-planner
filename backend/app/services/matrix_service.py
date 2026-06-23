@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.graph.state import FinancialContext, MatrixEdge, POICandidate
 from app.services.amap_service import AmapUnavailableError, build_amap_matrix
 from app.services.cache_service import MemoryCache
+from app.services.mcp_client import MCPToolError, call_tool
 
 
 MatrixBuild = tuple[dict[str, MatrixEdge], str]
@@ -54,10 +55,28 @@ def build_time_dependent_matrix_with_source(
         matrix, source = cached
         return matrix, f"cache:{source}"
 
-    try:
-        matrix = build_amap_matrix(nodes, financial)
-        source = "amap"
-    except AmapUnavailableError:
+    if settings.provider_mode.lower() == "amap":
+        try:
+            payload = call_tool(
+                "amap_distance_matrix",
+                {
+                    "nodes": [node.model_dump(mode="json") for node in nodes],
+                    "financial": financial.model_dump(mode="json"),
+                },
+            )
+            matrix = {
+                key: MatrixEdge.model_validate(value)
+                for key, value in (payload or {}).items()
+            }
+            source = "amap:mcp"
+        except (MCPToolError, ValueError, TypeError):
+            try:
+                matrix = build_amap_matrix(nodes, financial)
+                source = "amap"
+            except AmapUnavailableError:
+                matrix = build_fallback_matrix(nodes, financial)
+                source = "fallback"
+    else:
         matrix = build_fallback_matrix(nodes, financial)
         source = "fallback"
     matrix_cache.set(key, (matrix, source), ttl_seconds=settings.matrix_cache_ttl_seconds)
