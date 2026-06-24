@@ -30,28 +30,50 @@ def search_pois(
 
     seen: set[str] = set()
     pois: list[POICandidate] = []
-    for keyword in keywords or [category]:
+    query_keywords = _unique_keywords(keywords or [category])
+    per_keyword_limit = max(1, (limit + len(query_keywords) - 1) // len(query_keywords))
+    for keyword in query_keywords:
         payload = _request_json(
             "/place/text",
             {
                 "keywords": keyword,
                 "city": city,
-                "offset": limit,
+                "offset": per_keyword_limit,
                 "page": 1,
-                "extensions": "base",
+                "extensions": "all",
             },
         )
-        for item in payload.get("pois", []):
+        for item in payload.get("pois", [])[:per_keyword_limit]:
             poi = _poi_from_amap(item, fallback_category=keyword)
             if poi is None or poi.id in seen:
                 continue
             seen.add(poi.id)
             pois.append(poi)
+    if len(pois) < limit:
+        for keyword in query_keywords:
+            payload = _request_json(
+                "/place/text",
+                {
+                    "keywords": keyword,
+                    "city": city,
+                    "offset": limit,
+                    "page": 1,
+                    "extensions": "all",
+                },
+            )
+            for item in payload.get("pois", []):
+                poi = _poi_from_amap(item, fallback_category=keyword)
+                if poi is None or poi.id in seen:
+                    continue
+                seen.add(poi.id)
+                pois.append(poi)
+                if len(pois) >= limit:
+                    return pois
             if len(pois) >= limit:
                 return pois
     if not pois:
         raise AmapUnavailableError("Amap returned no POIs")
-    return pois
+    return pois[:limit]
 
 
 def resolve_hotel(city: str) -> POICandidate:
@@ -62,7 +84,6 @@ def resolve_hotel(city: str) -> POICandidate:
         update={
             "id": "hotel_anchor",
             "category": "hotel",
-            "fixed_cost": 0.0,
             "visit_duration_minutes": 0,
             "utility": 0.0,
             "indoor": True,
@@ -129,17 +150,20 @@ def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) ->
         if not destinations:
             continue
         try:
-            distances = _distance_rows(origin, destinations)
+            distances = _direction_rows(origin, destinations)
         except AmapUnavailableError:
             distances = {}
         for destination in destinations:
             fallback_edge = fallback[matrix_key(origin.id, destination.id, 9)]
-            meters, seconds = distances.get(destination.id, (fallback_edge.distance_km * 1000, fallback_edge.duration_minutes * 60))
+            meters, seconds, api_cost = distances.get(
+                destination.id,
+                (fallback_edge.distance_km * 1000, fallback_edge.duration_minutes * 60, None),
+            )
             distance_km = round(float(meters) / 1000, 2)
             base_minutes = max(1, round(float(seconds) / 60))
             for hour in range(24):
                 mode = _mode_for_amap_edge(distance_km, base_minutes, financial, hour)
-                cost = _cost_for_mode(distance_km, mode, financial, hour)
+                cost = _cost_for_mode(distance_km, mode, financial, hour, api_cost)
                 duration = base_minutes
                 if mode == TransportMode.driving:
                     duration = max(1, round(base_minutes * traffic_multiplier(hour)))
@@ -199,16 +223,55 @@ def _poi_from_amap(item: dict, fallback_category: str) -> POICandidate | None:
         return None
     raw_id = str(item.get("id") or item.get("name") or f"{lat},{lng}")
     category = _normalize_category(str(item.get("type") or fallback_category))
+    business = _business_extension(item)
+    rating = _float_or_default(business.get("rating") or item.get("rating"), _estimated_utility(category))
     return POICandidate(
         id=f"amap_{raw_id}".replace(" ", "_"),
         name=str(item.get("name") or fallback_category),
         category=category,
         coordinates=Coordinates(lat=lat, lng=lng),
-        fixed_cost=_estimated_ticket_cost(category),
+        fixed_cost=_cost_for_category(category, _business_cost(item)),
         visit_duration_minutes=_estimated_duration(category),
-        utility=_estimated_utility(category),
+        utility=min(10.0, max(1.0, rating * 2 if rating <= 5 else rating)),
         indoor=category in {"museum", "gallery", "shopping", "hotel"},
     )
+
+
+def _unique_keywords(keywords: list[str]) -> list[str]:
+    unique: list[str] = []
+    for keyword in keywords or ["attraction"]:
+        normalized = str(keyword).strip()
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return unique or ["attraction"]
+
+
+def _business_extension(item: dict) -> dict:
+    value = item.get("biz_ext") or item.get("bizExt") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _business_cost(item: dict) -> float | None:
+    business = _business_extension(item)
+    for value in (
+        business.get("cost"),
+        business.get("price"),
+        item.get("cost"),
+        item.get("price"),
+        item.get("avg_cost"),
+    ):
+        parsed = _optional_float(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _cost_for_category(category: str, business_cost: float | None) -> float:
+    if business_cost is None:
+        return _estimated_ticket_cost(category)
+    if category in {"museum", "gallery", "garden", "landmark", "food", "hotel"}:
+        return business_cost
+    return _estimated_ticket_cost(category)
 
 
 def _distance_rows(origin: POICandidate, destinations: list[POICandidate]) -> dict[str, tuple[float, float]]:
@@ -225,6 +288,36 @@ def _distance_rows(origin: POICandidate, destinations: list[POICandidate]) -> di
         if index >= len(destinations):
             break
         rows[destinations[index].id] = (float(result.get("distance") or 0), float(result.get("duration") or 0))
+    return rows
+
+
+def _direction_rows(origin: POICandidate, destinations: list[POICandidate]) -> dict[str, tuple[float, float, float | None]]:
+    """Prefer Amap direction prices; fall back to the bulk distance API for missing legs."""
+    rows: dict[str, tuple[float, float, float | None]] = {}
+    for destination in destinations:
+        try:
+            payload = _request_json(
+                "/direction/driving",
+                {
+                    "origin": f"{origin.coordinates.lng},{origin.coordinates.lat}",
+                    "destination": f"{destination.coordinates.lng},{destination.coordinates.lat}",
+                    "extensions": "base",
+                },
+            )
+            route = payload.get("route") or {}
+            paths = route.get("paths") or []
+            path = paths[0] if paths and isinstance(paths[0], dict) else {}
+            distance = float(path.get("distance") or 0)
+            duration = float(path.get("duration") or 0)
+            cost = _first_optional_float(route.get("taxi_cost"), path.get("taxi_cost"), path.get("cost"), path.get("tolls"))
+            if distance > 0 and duration > 0:
+                rows[destination.id] = (distance, duration, cost)
+        except AmapUnavailableError:
+            continue
+    missing = [destination for destination in destinations if destination.id not in rows]
+    if missing:
+        for destination_id, (distance, duration) in _distance_rows(origin, missing).items():
+            rows[destination_id] = (distance, duration, None)
     return rows
 
 
@@ -278,6 +371,20 @@ def _estimated_utility(category: str) -> float:
     }.get(category, 7.6)
 
 
+def _optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_default(value: object, default: float) -> float:
+    parsed = _optional_float(value)
+    return default if parsed is None else parsed
+
+
 def _mode_for_amap_edge(
     distance_km: float,
     driving_minutes: int,
@@ -293,9 +400,25 @@ def _mode_for_amap_edge(
     return TransportMode.driving
 
 
-def _cost_for_mode(distance_km: float, mode: TransportMode, financial: FinancialContext, hour: int) -> float:
+def _cost_for_mode(
+    distance_km: float,
+    mode: TransportMode,
+    financial: FinancialContext,
+    hour: int,
+    api_cost: float | None = None,
+) -> float:
     if mode == TransportMode.walking:
         return 0.0
     if mode == TransportMode.transit:
         return financial.base_transit_fare
+    if api_cost is not None and api_cost > 0:
+        return api_cost * traffic_multiplier(hour)
     return distance_km * financial.driving_rate_per_km * traffic_multiplier(hour)
+
+
+def _first_optional_float(*values: object) -> float | None:
+    for value in values:
+        parsed = _optional_float(value)
+        if parsed is not None:
+            return parsed
+    return None

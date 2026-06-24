@@ -14,7 +14,7 @@ MatrixBuild = tuple[dict[str, MatrixEdge], str]
 matrix_cache: MemoryCache[MatrixBuild] = MemoryCache()
 
 
-def _cache_key(nodes: list[POICandidate], financial: FinancialContext) -> str:
+def _cache_key(nodes: list[POICandidate], financial: FinancialContext, city: str = "") -> str:
     """Build a stable cache key from node IDs, coordinates, and cost settings."""
     raw = "|".join(
         [
@@ -25,6 +25,7 @@ def _cache_key(nodes: list[POICandidate], financial: FinancialContext) -> str:
             f"transit={financial.base_transit_fare}",
             f"driving={financial.driving_rate_per_km}",
             f"provider={settings.provider_mode}",
+            f"city={city}",
         ]
     )
     return sha1(raw.encode("utf-8")).hexdigest()
@@ -33,22 +34,24 @@ def _cache_key(nodes: list[POICandidate], financial: FinancialContext) -> str:
 def build_time_dependent_matrix(
     nodes: list[POICandidate],
     financial: FinancialContext,
+    city: str = "",
 ) -> dict[str, MatrixEdge]:
     """Build or reuse the route matrix.
 
     Second-stage behavior still falls back to Haversine, but the service now has
     the cache and provider boundary needed for real Amap batch calls later.
     """
-    matrix, _ = build_time_dependent_matrix_with_source(nodes, financial)
+    matrix, _ = build_time_dependent_matrix_with_source(nodes, financial, city)
     return matrix
 
 
 def build_time_dependent_matrix_with_source(
     nodes: list[POICandidate],
     financial: FinancialContext,
+    city: str = "",
 ) -> MatrixBuild:
     """Build or reuse the route matrix and report the selected source."""
-    key = _cache_key(nodes, financial)
+    key = _cache_key(nodes, financial, city)
     cached = matrix_cache.get(key)
     if cached is not None:
         matrix, source = cached
@@ -56,7 +59,10 @@ def build_time_dependent_matrix_with_source(
 
     if settings.provider_mode.lower() == "amap":
         try:
-            matrix = build_time_dependent_matrix_facts(nodes, financial)
+            try:
+                matrix = build_time_dependent_matrix_facts(nodes, financial, city)
+            except TypeError:
+                matrix = build_time_dependent_matrix_facts(nodes, financial)
             source = "amap:mcp"
         except GeoFactUnavailableError:
             matrix = build_fallback_matrix(nodes, financial)

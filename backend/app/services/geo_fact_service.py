@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from app.agents.intent_agent import CITY_ALIASES, PREFERENCE_KEYWORDS
 from app.core.config import settings
 from app.graph.state import Coordinates, DailyWeatherForecast, FinancialContext, MatrixEdge, POICandidate, WeatherConstraint
 from app.services.mcp_client import MCPToolError, call_tool
@@ -9,36 +12,75 @@ class GeoFactUnavailableError(RuntimeError):
     """Raised when the Amap MCP fact layer cannot provide usable data."""
 
 
-AMAP_CITY_ALIASES = {
-    "shanghai": "上海",
-    "beijing": "北京",
-    "hangzhou": "杭州",
-    "suzhou": "苏州",
-    "nanjing": "南京",
-    "guangzhou": "广州",
-    "shenzhen": "深圳",
-    "chengdu": "成都",
-    "chongqing": "重庆",
-    "xi'an": "西安",
-    "xian": "西安",
-}
-
 OFFICIAL_AMAP_TEXT_SEARCH_TOOL = "maps_text_search"
 OFFICIAL_AMAP_SEARCH_DETAIL_TOOL = "maps_search_detail"
 OFFICIAL_AMAP_GEO_TOOL = "maps_geo"
 OFFICIAL_AMAP_WEATHER_TOOL = "maps_weather"
+OFFICIAL_AMAP_DIRECTION_DRIVING_TOOL = "maps_direction_driving"
+OFFICIAL_AMAP_DIRECTION_TRANSIT_TOOL = "maps_direction_transit"
+OFFICIAL_AMAP_DIRECTION_WALKING_TOOL = "maps_direction_walking"
 
-OFFICIAL_KEYWORDS = {
-    "museum": ["museum"],
-    "food": ["restaurant", "food"],
-    "landmark": ["attraction", "landmark"],
-    "gallery": ["gallery", "art museum"],
-    "garden": ["park", "garden"],
-    "library": ["library"],
-    "shopping": ["shopping mall", "mall"],
-    "family": ["theme park", "kids"],
-    "hotel": ["hotel"],
-}
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _ordered_keyword_aliases(preference: str, aliases: set[str]) -> list[str]:
+    """Return deterministic Amap search terms derived from intent keywords."""
+    ordered: list[str] = []
+    for item in (preference, preference.replace("_", " ")):
+        if item and item not in ordered:
+            ordered.append(item)
+    for alias in sorted(
+        aliases,
+        key=lambda value: (
+            not _contains_cjk(value),
+            len(value),
+            value.lower(),
+        ),
+    ):
+        if alias and alias not in ordered:
+            ordered.append(alias)
+    return ordered
+
+
+def _build_amap_city_aliases() -> dict[str, str]:
+    """Sync all intent-agent city aliases into Amap-friendly Chinese city names."""
+    chinese_by_destination: dict[str, str] = {}
+    for alias, destination in CITY_ALIASES.items():
+        if _contains_cjk(alias):
+            chinese_by_destination.setdefault(destination.lower(), alias)
+
+    aliases: dict[str, str] = {}
+    for alias, destination in CITY_ALIASES.items():
+        amap_city = chinese_by_destination.get(destination.lower(), destination)
+        aliases[alias.lower()] = amap_city
+        aliases[destination.lower()] = amap_city
+    return aliases
+
+
+def _build_official_keywords() -> dict[str, list[str]]:
+    """Sync intent-agent preference keywords into Amap text-search terms."""
+    return {
+        preference: _ordered_keyword_aliases(preference, aliases)
+        for preference, aliases in PREFERENCE_KEYWORDS.items()
+    }
+
+
+AMAP_CITY_ALIASES = _build_amap_city_aliases()
+OFFICIAL_KEYWORDS = _build_official_keywords()
+
+
+@dataclass(frozen=True)
+class DirectionFact:
+    """Normalized travel fact from Amap direction tools."""
+
+    distance_km: float
+    duration_minutes: int
+    cost: float | None = None
+    boarding_station: str = ""
+    alighting_station: str = ""
+    note: str = ""
 
 
 def amap_mcp_enabled() -> bool:
@@ -51,15 +93,7 @@ def search_poi_facts(city: str, keywords: list[str], limit: int = 10) -> list[PO
     _require_amap_mode()
     errors: list[str] = []
     try:
-        payload = call_tool(
-            settings.amap_mcp_poi_tool,
-            {
-                "city": normalize_amap_city(city),
-                "keywords": keywords or ["attraction"],
-                "limit": limit,
-            },
-        )
-        pois = _coerce_poi_candidates(payload, fallback_category=(keywords or ["attraction"])[0])
+        pois = _search_configured_amap_pois_balanced(city, keywords or ["attraction"], limit)
         if pois:
             return pois[:limit]
     except (MCPToolError, ValueError, TypeError) as exc:
@@ -94,7 +128,6 @@ def resolve_hotel_fact(city: str) -> POICandidate:
                 update={
                     "id": "hotel_anchor",
                     "category": "hotel",
-                    "fixed_cost": 0.0,
                     "visit_duration_minutes": 0,
                     "utility": 0.0,
                     "indoor": True,
@@ -144,26 +177,38 @@ def fetch_weather_forecast_facts(city: str, days: int) -> list[DailyWeatherForec
 def build_time_dependent_matrix_facts(
     nodes: list[POICandidate],
     financial: FinancialContext,
+    city: str = "",
 ) -> dict[str, MatrixEdge]:
     """Fetch the road-network tensor from Amap MCP."""
     _require_amap_mode()
+    errors: list[str] = []
     try:
         payload = call_tool(
             settings.amap_mcp_matrix_tool,
             {
                 "nodes": [node.model_dump(mode="json") for node in nodes],
                 "financial": financial.model_dump(mode="json"),
+                "city": normalize_amap_city(city) if city else "",
             },
         )
         matrix = {
             key: MatrixEdge.model_validate(value)
             for key, value in (payload or {}).items()
         }
+        if matrix:
+            return matrix
     except (MCPToolError, ValueError, TypeError) as exc:
-        raise GeoFactUnavailableError(str(exc)) from exc
-    if not matrix:
-        raise GeoFactUnavailableError("Amap MCP returned an empty matrix")
-    return matrix
+        errors.append(str(exc))
+
+    try:
+        matrix = _build_official_direction_matrix(nodes, financial, city)
+        if matrix:
+            return matrix
+    except (MCPToolError, ValueError, TypeError) as exc:
+        errors.append(str(exc))
+
+    detail = f": {'; '.join(errors)}" if errors else ""
+    raise GeoFactUnavailableError(f"Amap MCP returned an empty matrix{detail}")
 
 
 def _require_amap_mode() -> None:
@@ -181,13 +226,83 @@ def normalize_amap_city(city: str) -> str:
     return AMAP_CITY_ALIASES.get(normalized.lower(), normalized)
 
 
+def _search_configured_amap_pois_balanced(city: str, keywords: list[str], limit: int) -> list[POICandidate]:
+    """Call the configured POI tool per preference so early keywords cannot monopolize results."""
+    normalized_city = normalize_amap_city(city)
+    candidates: list[POICandidate] = []
+    seen: set[str] = set()
+    per_keyword_limit = max(1, (limit + max(len(keywords), 1) - 1) // max(len(keywords), 1))
+    for keyword in _unique_keywords(keywords):
+        keyword_terms = _amap_keyword_queries([keyword])
+        payload = call_tool(
+            settings.amap_mcp_poi_tool,
+            {
+                "city": normalized_city,
+                "keywords": keyword_terms,
+                "limit": per_keyword_limit,
+            },
+        )
+        for poi in _coerce_poi_candidates(payload, fallback_category=keyword)[:per_keyword_limit]:
+            if poi.id in seen:
+                continue
+            seen.add(poi.id)
+            candidates.append(poi)
+
+    if len(candidates) < limit:
+        payload = call_tool(
+            settings.amap_mcp_poi_tool,
+            {
+                "city": normalized_city,
+                "keywords": _amap_keyword_queries(keywords or ["attraction"]),
+                "limit": limit,
+            },
+        )
+        for poi in _coerce_poi_candidates(payload, fallback_category=(keywords or ["attraction"])[0]):
+            if poi.id in seen:
+                continue
+            seen.add(poi.id)
+            candidates.append(poi)
+            if len(candidates) >= limit:
+                break
+    return candidates[:limit]
+
+
 def _search_official_amap_pois(city: str, keywords: list[str], limit: int) -> list[POICandidate]:
     """Read raw POIs from the official Amap MCP tool set."""
     city_context = _official_city_context(city)
     city_value = city_context.get("adcode") or city_context.get("city") or city
     pois: list[POICandidate] = []
     seen: set[str] = set()
-    for keyword in _official_keyword_queries(keywords):
+    queries = _official_keyword_queries(keywords)
+    per_query_limit = max(1, (limit + max(len(queries), 1) - 1) // max(len(queries), 1))
+    for keyword in queries:
+        payload = call_tool(
+            OFFICIAL_AMAP_TEXT_SEARCH_TOOL,
+            {
+                "keywords": keyword,
+                "city": city_value,
+                "citylimit": True,
+            },
+        )
+        for raw in _extract_raw_pois(payload)[:per_query_limit]:
+            raw_id = str(raw.get("id") or "")
+            detail = raw
+            if raw_id and not raw.get("location"):
+                try:
+                    detail_payload = call_tool(OFFICIAL_AMAP_SEARCH_DETAIL_TOOL, {"id": raw_id})
+                    if isinstance(detail_payload, dict):
+                        detail = {**raw, **detail_payload}
+                except MCPToolError:
+                    detail = raw
+            poi = _poi_from_official_amap(detail, fallback_category=keyword)
+            if poi is None or poi.id in seen:
+                continue
+            seen.add(poi.id)
+            pois.append(poi)
+    if len(pois) >= limit:
+        return pois[:limit]
+
+    for keyword in queries:
         payload = call_tool(
             OFFICIAL_AMAP_TEXT_SEARCH_TOOL,
             {
@@ -212,8 +327,28 @@ def _search_official_amap_pois(city: str, keywords: list[str], limit: int) -> li
             seen.add(poi.id)
             pois.append(poi)
             if len(pois) >= limit:
-                return pois
-    return pois
+                return pois[:limit]
+    return pois[:limit]
+
+
+def _unique_keywords(keywords: list[str]) -> list[str]:
+    unique: list[str] = []
+    for keyword in keywords or ["attraction"]:
+        normalized = str(keyword).strip()
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return unique or ["attraction"]
+
+
+def _amap_keyword_queries(keywords: list[str]) -> list[str]:
+    queries: list[str] = []
+    for keyword in keywords or ["attraction"]:
+        normalized = str(keyword).strip()
+        aliases = OFFICIAL_KEYWORDS.get(normalized.lower(), [normalized])
+        for alias in aliases:
+            if alias and alias not in queries:
+                queries.append(alias)
+    return queries or ["attraction"]
 
 
 def _official_city_context(city: str) -> dict[str, str]:
@@ -289,17 +424,50 @@ def _poi_from_official_amap(item: dict, fallback_category: str) -> POICandidate 
     category = _normalize_official_category(
         str(item.get("type") or item.get("typecode") or fallback_category)
     )
-    rating = _float_or_default(item.get("rating"), _estimated_utility(category))
+    business = _business_extension(item)
+    rating = _float_or_default(
+        business.get("rating") or item.get("rating"),
+        _estimated_utility(category),
+    )
+    fixed_cost = _cost_for_category(category, _business_cost(item))
     return POICandidate(
         id=f"amap_{raw_id}".replace(" ", "_"),
         name=str(item.get("name") or fallback_category),
         category=category,
         coordinates=Coordinates(lat=lat, lng=lng),
-        fixed_cost=_estimated_ticket_cost(category),
+        fixed_cost=fixed_cost,
         visit_duration_minutes=_estimated_duration(category),
         utility=min(10.0, max(1.0, rating * 2 if rating <= 5 else rating)),
         indoor=category in {"museum", "gallery", "shopping", "hotel", "library"},
     )
+
+
+def _business_extension(item: dict) -> dict:
+    value = item.get("biz_ext") or item.get("bizExt") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _business_cost(item: dict) -> float | None:
+    business = _business_extension(item)
+    for value in (
+        business.get("cost"),
+        business.get("price"),
+        item.get("cost"),
+        item.get("price"),
+        item.get("avg_cost"),
+    ):
+        parsed = _optional_float(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _cost_for_category(category: str, business_cost: float | None) -> float:
+    if business_cost is None:
+        return _estimated_ticket_cost(category)
+    if category in {"museum", "gallery", "garden", "landmark", "food", "hotel"}:
+        return business_cost
+    return _estimated_ticket_cost(category)
 
 
 def _normalize_official_category(raw: str) -> str:
@@ -362,6 +530,224 @@ def _float_or_default(value: object, default: float) -> float:
         return float(str(value))
     except (TypeError, ValueError):
         return default
+
+
+def _build_official_direction_matrix(
+    nodes: list[POICandidate],
+    financial: FinancialContext,
+    city: str,
+) -> dict[str, MatrixEdge]:
+    """Build matrix edges from official Amap MCP direction tools."""
+    matrix: dict[str, MatrixEdge] = {}
+    normalized_city = normalize_amap_city(city) if city else ""
+    for origin in nodes:
+        for destination in nodes:
+            if origin.id == destination.id:
+                continue
+            driving = _official_direction_fact(
+                OFFICIAL_AMAP_DIRECTION_DRIVING_TOOL,
+                origin,
+                destination,
+                normalized_city,
+            )
+            walking = None
+            if driving.distance_km <= 1.2:
+                walking = _official_direction_fact(
+                    OFFICIAL_AMAP_DIRECTION_WALKING_TOOL,
+                    origin,
+                    destination,
+                    normalized_city,
+                    required=False,
+                )
+            transit = _official_direction_fact(
+                OFFICIAL_AMAP_DIRECTION_TRANSIT_TOOL,
+                origin,
+                destination,
+                normalized_city,
+                required=False,
+            )
+            for hour in range(24):
+                mode, fact = _choose_direction_fact(driving, transit, walking, financial, hour)
+                duration = fact.duration_minutes
+                cost = fact.cost if fact.cost is not None else _fallback_cost(fact.distance_km, mode, financial, hour)
+                if mode == "Driving":
+                    duration = max(1, round(duration * _traffic_multiplier(hour)))
+                    cost = round(cost * _traffic_multiplier(hour), 2)
+                matrix[f"{origin.id}->{destination.id}@{hour:02d}"] = MatrixEdge(
+                    origin_id=origin.id,
+                    destination_id=destination.id,
+                    hour=hour,
+                    distance_km=fact.distance_km,
+                    duration_minutes=duration,
+                    mode=mode,
+                    cost=round(cost, 2),
+                    boarding_station=fact.boarding_station,
+                    alighting_station=fact.alighting_station,
+                    transit_note=fact.note,
+                )
+    return matrix
+
+
+def _official_direction_fact(
+    tool_name: str,
+    origin: POICandidate,
+    destination: POICandidate,
+    city: str,
+    required: bool = True,
+) -> DirectionFact:
+    arguments = {
+        "origin": _location_text(origin),
+        "destination": _location_text(destination),
+    }
+    if city:
+        arguments["city"] = city
+        arguments["cityd"] = city
+    try:
+        payload = call_tool(tool_name, arguments)
+    except MCPToolError:
+        if required:
+            raise
+        return DirectionFact(distance_km=0.0, duration_minutes=0)
+    fact = _direction_fact_from_payload(payload, tool_name)
+    if fact is None:
+        if required:
+            raise GeoFactUnavailableError(f"{tool_name} returned no usable route")
+        return DirectionFact(distance_km=0.0, duration_minutes=0)
+    return fact
+
+
+def _direction_fact_from_payload(payload: object, tool_name: str) -> DirectionFact | None:
+    if not isinstance(payload, dict):
+        return None
+    route = payload.get("route") if isinstance(payload.get("route"), dict) else payload
+    paths = route.get("paths") if isinstance(route, dict) else None
+    if isinstance(paths, list) and paths:
+        path = next((item for item in paths if isinstance(item, dict)), None)
+        if path is None:
+            return None
+        distance = _optional_float(path.get("distance") or route.get("distance"))
+        duration = _optional_float(path.get("duration") or route.get("duration"))
+        cost = _first_optional_float(
+            route.get("taxi_cost"),
+            path.get("taxi_cost"),
+            path.get("cost"),
+            path.get("tolls"),
+        )
+        if distance is None or duration is None:
+            return None
+        return DirectionFact(
+            distance_km=round(distance / 1000, 2),
+            duration_minutes=max(1, round(duration / 60)),
+            cost=cost,
+        )
+
+    transits = route.get("transits") if isinstance(route, dict) else None
+    if isinstance(transits, list) and transits:
+        transit = next((item for item in transits if isinstance(item, dict)), None)
+        if transit is None:
+            return None
+        distance = _optional_float(transit.get("distance") or route.get("distance"))
+        duration = _optional_float(transit.get("duration") or route.get("duration"))
+        cost = _first_optional_float(transit.get("cost"), route.get("cost"))
+        if distance is None or duration is None:
+            return None
+        boarding, alighting = _transit_stations(transit)
+        return DirectionFact(
+            distance_km=round(distance / 1000, 2),
+            duration_minutes=max(1, round(duration / 60)),
+            cost=cost,
+            boarding_station=boarding,
+            alighting_station=alighting,
+            note=_transit_note(boarding, alighting),
+        )
+
+    distance = _optional_float(payload.get("distance"))
+    duration = _optional_float(payload.get("duration"))
+    if distance is not None and duration is not None:
+        return DirectionFact(
+            distance_km=round(distance / 1000, 2),
+            duration_minutes=max(1, round(duration / 60)),
+            cost=_first_optional_float(payload.get("cost"), payload.get("taxi_cost")),
+        )
+    return None
+
+
+def _choose_direction_fact(
+    driving: DirectionFact,
+    transit: DirectionFact,
+    walking: DirectionFact | None,
+    financial: FinancialContext,
+    hour: int,
+) -> tuple[str, DirectionFact]:
+    if walking is not None and walking.duration_minutes > 0 and walking.distance_km <= 1.2:
+        return "Walking", walking
+    driving_cost = driving.cost if driving.cost is not None else _fallback_cost(driving.distance_km, "Driving", financial, hour)
+    if transit.duration_minutes > 0:
+        transit_cost = transit.cost if transit.cost is not None else financial.base_transit_fare
+        if driving_cost > transit_cost * 2.2 and transit.duration_minutes - driving.duration_minutes <= 20:
+            return "Transit", transit
+    return "Driving", driving
+
+
+def _location_text(node: POICandidate) -> str:
+    return f"{node.coordinates.lng},{node.coordinates.lat}"
+
+
+def _traffic_multiplier(hour: int) -> float:
+    if 7 <= hour <= 9:
+        return 1.35
+    if 17 <= hour <= 19:
+        return 1.45
+    if 22 <= hour or hour <= 5:
+        return 0.85
+    return 1.0
+
+
+def _fallback_cost(distance_km: float, mode: str, financial: FinancialContext, hour: int) -> float:
+    if mode == "Walking":
+        return 0.0
+    if mode == "Transit":
+        return financial.base_transit_fare
+    return distance_km * financial.driving_rate_per_km * _traffic_multiplier(hour)
+
+
+def _first_optional_float(*values: object) -> float | None:
+    for value in values:
+        parsed = _optional_float(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _transit_stations(transit: dict) -> tuple[str, str]:
+    segments = transit.get("segments") or []
+    if not isinstance(segments, list):
+        return "", ""
+    boarding = ""
+    alighting = ""
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        bus = segment.get("bus") if isinstance(segment.get("bus"), dict) else {}
+        buslines = bus.get("buslines") if isinstance(bus, dict) else []
+        if not isinstance(buslines, list) or not buslines:
+            continue
+        line = next((item for item in buslines if isinstance(item, dict)), None)
+        if line is None:
+            continue
+        departure = line.get("departure_stop") if isinstance(line.get("departure_stop"), dict) else {}
+        arrival = line.get("arrival_stop") if isinstance(line.get("arrival_stop"), dict) else {}
+        boarding = boarding or str(departure.get("name") or "")
+        alighting = str(arrival.get("name") or alighting)
+    return boarding, alighting
+
+
+def _transit_note(boarding: str, alighting: str) -> str:
+    if boarding and alighting:
+        return f"Board at {boarding}; alight at {alighting}."
+    if boarding:
+        return f"Board at {boarding}."
+    return ""
 
 
 def _coerce_weather_forecasts(payload: object, days: int, source: str) -> list[DailyWeatherForecast]:

@@ -1,50 +1,102 @@
 # Trip Planner
 
-基于 `prd.md` 的智能旅行规划系统工程骨架。
+智能旅行规划助手。项目目标是把自然语言旅行需求转成可执行的多日路线，并在预算、时间窗、天气、交通方式和地图事实约束下生成可解释行程。
 
-当前版本先实现一条可运行的本地计算链路：
+当前仓库已经具备可演示的端到端链路：
 
-- Map: 解析请求并生成候选 POI、酒店锚点、天气约束、预算上下文。
-- Compute: 构建距离/时间矩阵，执行容量感知的多日聚类、路线启发式求解、预算评估。
-- Reduce: 将结构化求解结果渲染为用户可读的行程说明。
-- GIS: 为每日路线生成抽稀后的几何轨迹与边界框，前端用 SVG 呈现坐标化路线。
-- Jobs: 规划任务会写入 `backend/data/jobs.jsonl`，可在服务重启后恢复。
-- Observability: 返回路线质量指标、预算使用率、交通方式占比和适应度曲线，供前端监控面板展示。
-- Streaming: 前端可通过 WebSocket 执行 `Stream Solve`，实时接收阶段事件并在完成后更新完整 TripState。
+- 意图解析：中文/英文城市、天数、预算、时间窗、偏好。
+- Map 阶段：POI、酒店、天气、消费上下文。
+- Compute 阶段：时变交通矩阵、多日聚类、NSGA-II 路线求解、预算评估与修复。
+- Reduce 阶段：生成用户可读行程文案。
+- 前端工作台：请求解析、路线规划、流式规划、地图、预算、天气、事件、任务、导出。
 
-## Backend
+项目不是纯 LLM 套壳。LLM 只负责意图解析和文案渲染；坐标、距离、预算、路线顺序由后端事实服务和 Python 算法处理。
+
+## 当前状态
+
+按当前代码和验证结果：
+
+- MVP 演示完成度：约 80%。
+- 生产级完成度：约 60%-65%。
+- 后端测试主体通过：`40 passed, 3 skipped`，另有 1 个 Job 持久化测试在当前 Windows 权限环境下失败。
+- 前端类型检查通过；Vite 可在临时输出目录构建成功。
+
+主要限制：
+
+- 高德价格字段已接入，但酒店房态、景点门票和餐饮实时成交价不是全量真实价格。
+- 路线几何是后端简化连线，不是完整道路 polyline。
+- 前端重规划目前是固定按钮插入示例 POI，不是拖拽交互。
+- WebSocket 推送节点级事件，不是 solver 每一代的高频实时流。
+- HTML 导出已实现，PDF/PNG/Headless Chrome 导出未实现。
+- `backend/data/jobs.jsonl` 在部分 Windows 权限环境下可能写入失败。
+
+## 技术栈
+
+后端：
+
+- FastAPI
+- Pydantic v2
+- LangGraph
+- Python 运筹与图计算模块
+- MCP JSON-RPC client/server
+
+前端：
+
+- Vue 3
+- Vite
+- Pinia
+- ECharts
+- 高德 JSAPI 2.0
+
+## 项目结构
+
+```text
+trip-planner/
+├── backend/
+│   ├── app/
+│   │   ├── agents/          # intent / attraction / hotel / weather / finance / planner
+│   │   ├── algorithms/      # clustering / matrix / VRP / budget / geometry
+│   │   ├── api/             # HTTP / WebSocket / health
+│   │   ├── core/            # config / exceptions
+│   │   ├── graph/           # LangGraph state, nodes, edges, workflow
+│   │   ├── mcp_server/      # project-local MCP tools
+│   │   └── services/        # amap, geo facts, matrix, cache, jobs, export, LLM
+│   ├── scripts/
+│   └── tests/
+└── frontend/
+    ├── src/
+    │   ├── api/
+    │   ├── components/
+    │   ├── router/
+    │   ├── stores/
+    │   ├── types/
+    │   └── views/
+    └── package.json
+```
+
+## 快速启动
+
+### 1. 后端
 
 ```powershell
 cd backend
 python -m pip install -r requirements.txt
-python -m pytest
 uvicorn app.main:app --reload
 ```
 
-`FastAPI` 和 `LangGraph` 属于运行依赖；核心算法与测试不依赖外部地图服务。
+默认服务地址：
 
-可选外部能力通过环境变量开启；未开启或调用失败时会自动回退到本地 demo/fallback：
-
-```powershell
-# 高德 POI / 酒店 / 距离矩阵
-$env:TRIP_PROVIDER_MODE="amap"
-$env:TRIP_AMAP_API_KEY="your-amap-key"
-
-# OpenAI-compatible LLM 意图解析与行程文案渲染
-$env:TRIP_LLM_ENABLED="true"
-$env:TRIP_LLM_API_KEY="your-llm-key"
-$env:TRIP_LLM_MODEL="gpt-4o-mini"
+```text
+http://127.0.0.1:8000
 ```
 
-无需启动服务也可以运行本地演示：
+健康检查：
 
 ```powershell
-python backend\scripts\demo_workflow.py
-python backend\scripts\demo_replan.py
-python backend\scripts\demo_job_export.py
+Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-## Frontend
+### 2. 前端
 
 ```powershell
 cd frontend
@@ -52,66 +104,213 @@ npm install
 npm run dev
 ```
 
-前端当前提供工作台骨架、路线编辑列表、预算面板和地图占位组件。
+默认前端地址：
 
-## API
+```text
+http://127.0.0.1:5173
+```
 
-- `POST /api/trips/plan`: 提交旅行规划请求。
-- `POST /api/trips/intent/parse`: 将自然语言请求解析为结构化 `IntentConstraints`。
-- `GET /api/trips/demo`: 获取演示规划结果。
-- `POST /api/trips/replan`: 对某一天执行局部插入重规划。
-- `POST /api/trips/export`: 返回 HTML 导出载荷。
-- `POST /api/trips/export/file`: 将 HTML 导出文件写入 `backend/exports/`。
-- `POST /api/trips/jobs`: 创建可查询的规划任务。
-- `GET /api/trips/jobs`: 获取任务摘要列表。
-- `GET /api/trips/jobs/{job_id}`: 获取任务状态、事件和最终状态。
-- `WS /ws/solve`: 接收求解中间态事件，最终 `complete` 事件返回完整 `TripState`。
-- `GET /health`: 服务健康检查。
+如果 PowerShell 禁止执行 `npm.ps1`，使用：
 
-## Runtime Data
+```powershell
+npm.cmd run dev
+```
 
-- `backend/data/`: JSONL 任务存储。
-- `backend/exports/`: 导出的 HTML 文件。
-- `backend/.test-exports/` 和 `backend/.test-jobs/`: 测试临时输出。
-## Amap MCP Runtime
+## 环境变量
 
-Production Amap mode now requires a real external MCP endpoint. The backend no
-longer silently falls back to its in-process demo MCP server when
-`TRIP_PROVIDER_MODE=amap`.
+项目会读取根目录 `.env` 和 `backend/.env`。真实密钥不要提交到仓库。
+
+### 本地 fallback 模式
+
+不配置高德和 LLM 也能跑通 demo 链路：
+
+```powershell
+$env:TRIP_PROVIDER_MODE="local"
+$env:TRIP_LLM_ENABLED="false"
+```
+
+### 高德 MCP 模式
+
+生产/真实数据模式建议走外部 MCP endpoint：
 
 ```powershell
 $env:TRIP_PROVIDER_MODE="amap"
 $env:TRIP_MCP_HTTP_URL="https://your-amap-mcp-host.example/mcp"
 $env:TRIP_MCP_TIMEOUT_SECONDS="20"
-# Optional: map this project to the real Amap MCP server's tool names.
+```
+
+可选工具名映射：
+
+```powershell
 $env:TRIP_AMAP_MCP_POI_TOOL="amap_poi_search"
 $env:TRIP_AMAP_MCP_HOTEL_TOOL="amap_hotel_anchor"
 $env:TRIP_AMAP_MCP_WEATHER_TOOL="amap_weather_constraints"
 $env:TRIP_AMAP_MCP_MATRIX_TOOL="amap_distance_matrix"
 ```
 
-The project-local MCP server remains available only for development:
+项目内开发 MCP server：
 
 ```powershell
 $env:TRIP_MCP_ALLOW_INPROCESS="true"
 python backend\scripts\run_mcp_server.py
 ```
 
-Use the in-process server only for local testing. Real POI, hotel, weather, and
-distance-matrix facts should come through `TRIP_MCP_HTTP_URL`.
+或 HTTP 版本：
 
-## Amap JS Frontend
+```powershell
+python backend\scripts\run_mcp_http_server.py
+$env:TRIP_MCP_HTTP_URL="http://127.0.0.1:8765/mcp"
+```
 
-The frontend route map uses Amap JSAPI 2.0. Set a Gaode Web JS API key before
-starting Vite:
+### 高德 WebService 直连模式
+
+项目仍保留 `TRIP_AMAP_API_KEY` 直连路径：
+
+```powershell
+$env:TRIP_PROVIDER_MODE="amap"
+$env:TRIP_AMAP_API_KEY="your-amap-webservice-key"
+```
+
+### 前端高德地图
 
 ```powershell
 $env:VITE_AMAP_JS_KEY="your-amap-js-key"
-# Optional, when your Amap Web JSAPI app has a security code enabled:
-$env:VITE_AMAP_SECURITY_CODE="your-amap-security-code"
-npm run dev
+$env:VITE_AMAP_SECURITY_CODE="optional-security-code"
 ```
 
-`VITE_AMAP_API_KEY` is also accepted for local convenience, but
-`VITE_AMAP_JS_KEY` is preferred so the browser key is distinct from backend MCP
-or Web Service keys.
+`VITE_AMAP_API_KEY` 也可用于本地兼容，但推荐使用 `VITE_AMAP_JS_KEY`，避免和后端 WebService/MCP key 混用。
+
+### LLM
+
+```powershell
+$env:TRIP_LLM_ENABLED="true"
+$env:TRIP_LLM_API_KEY="your-llm-key"
+$env:TRIP_LLM_BASE_URL="https://api.openai.com/v1"
+$env:TRIP_LLM_MODEL="gpt-4o-mini"
+```
+
+LLM 失败时，意图解析会回退规则解析，行程文案会回退模板渲染。
+
+## 常用命令
+
+### 后端测试
+
+```powershell
+cd backend
+C:\Users\lenovo\anaconda3\envs\open_ai\python.exe -m pytest tests\test_workflow.py
+```
+
+当前已知：完整测试在当前 Windows 权限环境下有一个 `backend/data/jobs.jsonl` 写入失败。核心算法、意图、高德、预算、工作流相关测试通过。
+
+### 前端类型检查
+
+```powershell
+cd frontend
+npx.cmd vue-tsc --noEmit
+```
+
+### 前端构建
+
+默认构建：
+
+```powershell
+cd frontend
+npm.cmd run build
+```
+
+如果 `frontend/dist/assets` 因权限或锁定无法创建，可临时验证构建：
+
+```powershell
+npx.cmd vite build --outDir ..\run-logs\frontend-build-check --emptyOutDir
+```
+
+## API
+
+核心接口：
+
+- `POST /api/trips/intent/parse`：解析自然语言请求。
+- `POST /api/trips/plan`：提交结构化意图并规划路线。
+- `POST /api/trips/replan`：对某一天执行局部插入重规划。
+- `GET /api/trips/demo`：返回 demo TripState。
+- `POST /api/trips/export`：返回 HTML 导出 payload。
+- `POST /api/trips/export/file`：写出 HTML 文件。
+- `POST /api/trips/jobs`：创建规划任务。
+- `GET /api/trips/jobs`：任务摘要列表。
+- `GET /api/trips/jobs/{job_id}`：任务详情。
+- `GET /api/trips/jobs/{job_id}/events`：增量事件。
+- `GET /api/trips/workflow/topology`：工作流拓扑。
+- `GET /health`：健康检查。
+- `GET /health/capabilities`：运行时能力。
+- `GET /health/integrations/probe`：高德/LLM 探测。
+- `WS /ws/solve`：流式规划。
+
+示例：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/api/trips/intent/parse `
+  -ContentType "application/json; charset=utf-8" `
+  -Body '{"user_query":"去长沙玩2天，预算800元"}'
+```
+
+## 已实现亮点
+
+- Intent 城市和偏好关键词已和高德事实服务同步。
+- POI 搜索按多个 preference 均衡召回，避免路线全是首个偏好。
+- 高德/MCP 路径读取方向工具中的距离、时长、公交费用、出租车估价等字段。
+- 酒店/餐饮消费字段可反写预算上下文，避免部分重复计费。
+- 预算超限会进入剪枝和重算。
+- 前端可展示交通方式、上下车站点、每日预算、天气、酒店、事件和质量指标。
+
+## 当前验证记录
+
+最近一次检查结果：
+
+- 后端：`40 passed, 3 skipped, 1 failed`。
+- 后端唯一失败：`test_job_events_endpoint_when_fastapi_is_available`，原因是当前环境拒绝写入 `backend/data/jobs.jsonl`。
+- 前端：`npx.cmd vue-tsc --noEmit` 通过。
+- 前端：`npx.cmd vite build --outDir ..\run-logs\frontend-build-check --emptyOutDir` 通过。
+- 前端默认 `npm.cmd run build` 可能因 `frontend/dist/assets` 权限失败。
+
+## 后续更新计划
+
+### P0：稳定性与可交付修复
+
+- 修复 JobStore 默认写入路径权限问题，支持无法落盘时降级内存态或使用可配置 runtime 目录。
+- 清理 `frontend/dist` 权限/锁定问题，保证默认 `npm run build` 可重复成功。
+- 为 `.env` 增加示例文件，避免密钥和运行配置混乱。
+- 增加端到端 smoke test：parse → plan → budget → export。
+
+### P1：真实数据质量
+
+- 完善高德 live probe，分别验证 POI、酒店、天气、驾车、公交、步行工具。
+- 标记每个价格字段来源：实时、参考、估算。
+- 接入更可靠的酒店/门票/餐饮价格源，避免把高德 POI cost 当作所有场景的真实成交价。
+- 对高德失败增加重试、限流和熔断日志。
+
+### P2：交互体验
+
+- 实现前端拖拽排序与真实局部重规划。
+- 支持地图点击 POI 插入路线。
+- 增强加载、错误、空状态和移动端布局。
+- 在路线卡片中展示价格来源、天气影响和预算修复原因。
+
+### P3：导出与展示
+
+- 接入 Headless Chrome，将 HTML 导出升级为 PDF/PNG。
+- 导出中加入地图截图、预算图表和每日路线摘要。
+- 支持导出文件历史列表。
+
+### P4：算法增强
+
+- 使用真实道路 polyline 替代直线插值几何。
+- 让 WebSocket 推送 solver 内部每代 fitness，而不只是节点事件。
+- 增加 POI 替代策略：预算超标时优先替换而不是只删除。
+- 优化多日预算分配，避免前几天过度消耗预算。
+
+## 文档
+
+- 产品与架构说明：[`prd.md`](./prd.md)
+- 后端入口：[`backend/app/main.py`](./backend/app/main.py)
+- 前端入口：[`frontend/src/views/PlannerWorkspace.vue`](./frontend/src/views/PlannerWorkspace.vue)

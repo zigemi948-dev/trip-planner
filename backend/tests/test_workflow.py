@@ -16,7 +16,14 @@ from app.graph.state import Coordinates, ExportRequest, FinancialContext, Intent
 from app.graph import nodes as workflow_nodes
 from app.services import provider_adapters
 from app.services.amap_service import AmapUnavailableError, _poi_from_amap
+from app.services.geo_fact_service import (
+    _official_keyword_queries,
+    build_time_dependent_matrix_facts,
+    normalize_amap_city,
+    search_poi_facts,
+)
 from app.graph.workflow import get_langgraph_workflow, run_replan_workflow, run_trip_workflow
+from app.graph.nodes import _apply_market_price_context
 from app.services.export_service import persist_export_payload, render_export_payload
 from app.services.job_service import JobStore
 from app.services.matrix_service import build_time_dependent_matrix_with_source, matrix_cache
@@ -281,6 +288,135 @@ def test_amap_poi_payload_maps_to_candidate():
     assert poi.coordinates.lat == 31.2304
 
 
+def test_amap_poi_payload_uses_business_cost_when_available():
+    poi = _poi_from_amap(
+        {
+            "id": "H001",
+            "name": "Amap Hotel",
+            "type": "酒店",
+            "location": "121.4737,31.2304",
+            "biz_ext": {"cost": "268", "rating": "4.6"},
+        },
+        fallback_category="hotel",
+    )
+
+    assert poi is not None
+    assert poi.fixed_cost == 268
+    assert poi.utility == 9.2
+
+
+def test_geo_fact_city_aliases_are_synced_from_intent_agent():
+    assert normalize_amap_city("Changsha") == "长沙"
+    assert normalize_amap_city("Xiamen") == "厦门"
+    assert normalize_amap_city("Urumqi") == "乌鲁木齐"
+    assert normalize_amap_city("长沙") == "长沙"
+
+
+def test_geo_fact_keywords_are_synced_from_intent_agent_preferences():
+    hot_spring_queries = _official_keyword_queries(["hot_spring"])
+    photography_queries = _official_keyword_queries(["photography"])
+    nightlife_queries = _official_keyword_queries(["nightlife"])
+
+    assert "温泉" in hot_spring_queries
+    assert "拍照" in photography_queries
+    assert "夜景" in nightlife_queries
+    assert "attraction" in hot_spring_queries
+
+
+def test_search_poi_facts_balances_preferences(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.services.geo_fact_service.settings.provider_mode", "amap")
+    monkeypatch.setattr("app.services.geo_fact_service.settings.mcp_http_url", "http://amap-mcp.example/mcp")
+
+    def fake_tool(name: str, arguments: dict):
+        keyword = arguments["keywords"][0]
+        locations = {
+            "museum": ("121.4700,31.2300", "博物馆", "Museum"),
+            "food": ("121.4800,31.2310", "餐饮服务", "Food"),
+            "garden": ("121.4900,31.2320", "公园", "Garden"),
+        }
+        location, poi_type, label = locations[keyword]
+        return [
+            {
+                "id": f"{keyword}_{index}",
+                "name": f"{label} {index}",
+                "type": poi_type,
+                "location": location,
+            }
+            for index in range(3)
+        ]
+
+    monkeypatch.setattr("app.services.geo_fact_service.call_tool", fake_tool)
+
+    pois = search_poi_facts("Shanghai", ["museum", "food", "garden"], limit=6)
+
+    categories = {poi.category for poi in pois}
+    assert {"museum", "food", "garden"} <= categories
+
+
+def test_market_price_context_uses_hotel_and_food_costs_without_double_counting():
+    hotel = POICandidate(
+        id="hotel",
+        name="Market Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.23, lng=121.47),
+        fixed_cost=320,
+    )
+    food = POICandidate(
+        id="food",
+        name="Market Restaurant",
+        category="food",
+        coordinates=Coordinates(lat=31.24, lng=121.48),
+        fixed_cost=68,
+    )
+
+    financial, pois = _apply_market_price_context(FinancialContext(), hotel, [food])
+
+    assert financial.avg_hotel_nightly_cost == 320
+    assert financial.avg_meal_cost == 68
+    assert pois[0].fixed_cost == 0
+
+
+def test_official_direction_matrix_uses_amap_cost_fields(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.services.geo_fact_service.settings.provider_mode", "amap")
+    monkeypatch.setattr("app.services.geo_fact_service.settings.mcp_http_url", "http://amap-mcp.example/mcp")
+
+    def fake_tool(name: str, arguments: dict):
+        if name == "amap_distance_matrix":
+            raise MCPToolError("custom matrix unavailable")
+        if name == "maps_direction_driving":
+            return {
+                "route": {
+                    "taxi_cost": "28",
+                    "paths": [{"distance": "6000", "duration": "1200"}],
+                }
+            }
+        if name == "maps_direction_transit":
+            return {"route": {"transits": [{"distance": "6500", "duration": "3600", "cost": "4"}]}}
+        raise MCPToolError(f"unexpected tool {name}")
+
+    monkeypatch.setattr("app.services.geo_fact_service.call_tool", fake_tool)
+    hotel = POICandidate(
+        id="hotel",
+        name="Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.23, lng=121.47),
+    )
+    museum = POICandidate(
+        id="museum",
+        name="Museum",
+        category="museum",
+        coordinates=Coordinates(lat=31.24, lng=121.48),
+    )
+
+    matrix = build_time_dependent_matrix_facts([hotel, museum], FinancialContext(), city="Shanghai")
+
+    edge = matrix[matrix_key("hotel", "museum", 10)]
+    assert edge.mode == TransportMode.driving
+    assert edge.distance_km == 6
+    assert edge.duration_minutes == 20
+    assert edge.cost == 28
+
+
 def test_amap_provider_falls_back_to_local_when_unavailable(monkeypatch: pytest.MonkeyPatch):
     def fail_tool(*args, **kwargs):
         raise MCPToolError("offline")
@@ -384,14 +520,11 @@ def test_amap_agents_read_geo_facts_through_mcp_layer(monkeypatch: pytest.Monkey
     assert hotel.name == "Amap Hotel"
     assert weather.constraints[0].reason == "amap_heat:test"
     assert weather.forecasts[0].weather == "晴"
-    assert [name for name, _ in calls] == [
-        "amap_poi_search",
-        "amap_hotel_anchor",
-        "amap_weather_constraints",
-        "amap_weather_constraints",
-        "maps_geo",
-        "maps_weather",
-    ]
+    called_tool_names = [name for name, _ in calls]
+    assert "amap_poi_search" in called_tool_names
+    assert "amap_hotel_anchor" in called_tool_names
+    assert called_tool_names.count("amap_weather_constraints") == 2
+    assert called_tool_names[-2:] == ["maps_geo", "maps_weather"]
     assert all(arguments["city"] == "上海" for name, arguments in calls if name.startswith("amap_"))
     assert weather.constraints[0].day is None
 

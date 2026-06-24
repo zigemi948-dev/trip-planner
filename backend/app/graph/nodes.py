@@ -7,6 +7,7 @@ from app.algorithms.budget_pruner import remove_budget_candidate
 from app.algorithms.observability import build_fitness_curve, compute_route_quality
 from app.algorithms.vrp_solver import is_feasible_visit, solve_routes
 from app.graph.state import GraphStatus, HotelStay, RoutingSolution, TripState, WeatherReport
+from app.graph.state import FinancialContext, POICandidate
 from app.services.matrix_service import build_time_dependent_matrix_with_source
 from app.services.provider_adapters import provider_registry
 
@@ -49,6 +50,11 @@ def map_agents_node(state: TripState) -> TripState:
     state.financial_context = results["finance_agent"]
     state.spatial_graph_data.hotel_anchor = results["hotel_agent"]
     state.spatial_graph_data.poi_candidates = results["attraction_agent"]
+    state.financial_context, state.spatial_graph_data.poi_candidates = _apply_market_price_context(
+        state.financial_context,
+        state.spatial_graph_data.hotel_anchor,
+        state.spatial_graph_data.poi_candidates,
+    )
     weather_report: WeatherReport = results["weather_agent"]
     state.spatial_graph_data.weather_constraints = weather_report.constraints
     state.spatial_graph_data.weather_forecast = weather_report.forecasts
@@ -82,7 +88,11 @@ def matrix_builder_node(state: TripState) -> TripState:
     if hotel is None:
         raise ValueError("hotel anchor is required before matrix build")
     nodes = [hotel, *state.spatial_graph_data.poi_candidates]
-    matrix, source = build_time_dependent_matrix_with_source(nodes, state.financial_context)
+    matrix, source = build_time_dependent_matrix_with_source(
+        nodes,
+        state.financial_context,
+        state.intent_constraints.destination,
+    )
     state.spatial_graph_data.time_dependent_tensor = matrix
     state.graph_controls.current_status = GraphStatus.matrix_ready
     state.emit("matrix_ready", {"edges": len(state.spatial_graph_data.time_dependent_tensor), "source": source})
@@ -206,6 +216,30 @@ def planner_reduce_node(state: TripState) -> TripState:
     state.graph_controls.current_status = GraphStatus.rendered
     state.emit("rendered", {"chars": len(solution.narrative)})
     return state
+
+
+def _apply_market_price_context(
+    financial_context: FinancialContext,
+    hotel: POICandidate | None,
+    pois: list[POICandidate],
+) -> tuple[FinancialContext, list[POICandidate]]:
+    """Use Amap POI prices to tune hotel and meal assumptions without double-counting food stops."""
+    updates = {}
+    if hotel is not None and hotel.fixed_cost > 0:
+        updates["avg_hotel_nightly_cost"] = hotel.fixed_cost
+
+    meal_costs = [poi.fixed_cost for poi in pois if poi.category == "food" and poi.fixed_cost > 0]
+    normalized_pois = pois
+    if meal_costs:
+        updates["avg_meal_cost"] = sum(meal_costs) / len(meal_costs)
+        normalized_pois = [
+            poi.model_copy(update={"fixed_cost": 0.0}) if poi.category == "food" else poi
+            for poi in pois
+        ]
+
+    if updates:
+        financial_context = financial_context.model_copy(update=updates)
+    return financial_context, normalized_pois
 
 
 def _build_hotel_stays(state: TripState) -> list[HotelStay]:
