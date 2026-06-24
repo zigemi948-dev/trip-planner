@@ -145,6 +145,13 @@ def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) ->
                     duration = max(1, round(base_minutes * traffic_multiplier(hour)))
                 elif mode == TransportMode.transit:
                     duration = max(1, round(base_minutes * 1.18))
+                boarding_station = ""
+                alighting_station = ""
+                transit_note = ""
+                if mode == TransportMode.transit:
+                    boarding_station = f"{origin.name} nearby transit stop"
+                    alighting_station = f"{destination.name} nearby transit stop"
+                    transit_note = f"Board at {boarding_station}; alight at {alighting_station}."
                 matrix[matrix_key(origin.id, destination.id, hour)] = MatrixEdge(
                     origin_id=origin.id,
                     destination_id=destination.id,
@@ -153,6 +160,9 @@ def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) ->
                     duration_minutes=duration,
                     mode=mode,
                     cost=round(cost, 2),
+                    boarding_station=boarding_station,
+                    alighting_station=alighting_station,
+                    transit_note=transit_note,
                 )
 
     if not matrix:

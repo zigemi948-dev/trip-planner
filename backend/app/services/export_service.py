@@ -48,6 +48,23 @@ def _solution_to_html(solution: RoutingSolution) -> str:
         f"<li>{escape(action.removed_poi_name)}: {escape(action.reason)}</li>"
         for action in solution.repair_actions
     )
+    weather_rows = "".join(
+        f"<tr><td>{forecast.day}</td><td>{escape(forecast.date)}</td>"
+        f"<td>{escape(forecast.weather)}</td><td>{_temperature_text(forecast.temperature_min, forecast.temperature_max)}</td>"
+        f"<td>{escape(forecast.wind)}</td><td>{escape(forecast.advisory)}</td></tr>"
+        for forecast in solution.daily_weather
+    )
+    hotel_rows = "".join(
+        f"<tr><td>{stay.day}</td><td>{escape(stay.hotel.name)}</td>"
+        f"<td>{escape(stay.check_in_time)}</td><td>{escape(stay.check_out_time)}</td>"
+        f"<td>{escape(stay.note)}</td></tr>"
+        for stay in solution.hotel_stays
+    )
+    cost_rows = "".join(
+        f"<tr><td>{cost.day}</td><td>{cost.accommodation_cost:.2f}</td><td>{cost.ticket_cost:.2f}</td>"
+        f"<td>{cost.food_cost:.2f}</td><td>{cost.transport_cost:.2f}</td><td>{cost.total_cost:.2f}</td></tr>"
+        for cost in solution.daily_costs
+    )
     narrative = escape(solution.narrative)
     return f"""<!doctype html>
 <html lang="en">
@@ -60,7 +77,7 @@ def _solution_to_html(solution: RoutingSolution) -> str:
     pre {{ white-space: pre-wrap; background: #f6f8fb; padding: 16px; border-radius: 8px; }}
     table {{ width: 100%; border-collapse: collapse; margin: 16px 0; }}
     th, td {{ border-bottom: 1px solid #d9e0ea; padding: 8px; text-align: left; }}
-    .budget {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }}
+    .budget {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }}
     .budget div {{ background: #f6f8fb; border-radius: 8px; padding: 12px; }}
   </style>
 </head>
@@ -74,7 +91,29 @@ def _solution_to_html(solution: RoutingSolution) -> str:
     <div><strong>Tickets</strong><br />{budget.fixed_cost:.2f}</div>
     <div><strong>Transport</strong><br />{budget.transport_cost:.2f}</div>
     <div><strong>Remaining</strong><br />{budget.remaining:.2f}</div>
+    <div><strong>Hotel</strong><br />{budget.accommodation_cost:.2f}</div>
   </section>
+  <h2>Daily Cost Details</h2>
+  <table>
+    <thead>
+      <tr><th>Day</th><th>Hotel</th><th>Tickets</th><th>Food</th><th>Transport</th><th>Total</th></tr>
+    </thead>
+    <tbody>{cost_rows or "<tr><td colspan='6'>No daily costs</td></tr>"}</tbody>
+  </table>
+  <h2>Daily Weather</h2>
+  <table>
+    <thead>
+      <tr><th>Day</th><th>Date</th><th>Weather</th><th>Temp</th><th>Wind</th><th>Advisory</th></tr>
+    </thead>
+    <tbody>{weather_rows or "<tr><td colspan='6'>No weather forecast</td></tr>"}</tbody>
+  </table>
+  <h2>Hotel Stay</h2>
+  <table>
+    <thead>
+      <tr><th>Day</th><th>Hotel</th><th>Check-in</th><th>Departure</th><th>Note</th></tr>
+    </thead>
+    <tbody>{hotel_rows or "<tr><td colspan='5'>No hotel assigned</td></tr>"}</tbody>
+  </table>
   <h2>Route Details</h2>
   <table>
     <thead>
@@ -88,3 +127,13 @@ def _solution_to_html(solution: RoutingSolution) -> str:
   <ul>{repairs or "<li>None</li>"}</ul>
 </body>
 </html>"""
+
+
+def _temperature_text(low: float | None, high: float | None) -> str:
+    if low is not None and high is not None:
+        return f"{low:.0f}-{high:.0f} C"
+    if high is not None:
+        return f"{high:.0f} C"
+    if low is not None:
+        return f"{low:.0f} C"
+    return ""

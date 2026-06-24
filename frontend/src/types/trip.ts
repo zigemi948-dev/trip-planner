@@ -33,6 +33,18 @@ export interface RouteStop {
   inbound_mode: TransportMode | null;
   inbound_cost: number;
   inbound_distance_km: number;
+  inbound_boarding_station: string;
+  inbound_alighting_station: string;
+  inbound_transit_note: string;
+}
+
+export interface DayCostBreakdown {
+  day: number;
+  ticket_cost: number;
+  transport_cost: number;
+  food_cost: number;
+  accommodation_cost: number;
+  total_cost: number;
 }
 
 export interface DayRoute {
@@ -41,6 +53,7 @@ export interface DayRoute {
   total_minutes: number;
   total_cost: number;
   fitness_score: number;
+  cost_breakdown: DayCostBreakdown | null;
   geometry: Coordinates[];
   bounds: BoundingBox | null;
 }
@@ -49,6 +62,7 @@ export interface BudgetBreakdown {
   fixed_cost: number;
   transport_cost: number;
   food_cost: number;
+  accommodation_cost: number;
   total_cost: number;
   budget_limit: number;
   remaining: number;
@@ -70,9 +84,32 @@ export interface RouteQualityMetrics {
   mode_share: Record<string, number>;
 }
 
+export interface DailyWeatherForecast {
+  day: number;
+  date: string;
+  weather: string;
+  temperature_min: number | null;
+  temperature_max: number | null;
+  wind: string;
+  advisory: string;
+  source: string;
+}
+
+export interface HotelStay {
+  day: number;
+  hotel: POICandidate;
+  check_in_time: string;
+  check_out_time: string;
+  note: string;
+}
+
 export interface RoutingSolution {
   optimized_route: DayRoute[];
   budget_breakdown: BudgetBreakdown;
+  daily_costs: DayCostBreakdown[];
+  hotel_anchor: POICandidate | null;
+  hotel_stays: HotelStay[];
+  daily_weather: DailyWeatherForecast[];
   narrative: string;
   warnings: string[];
   repair_actions: Array<{

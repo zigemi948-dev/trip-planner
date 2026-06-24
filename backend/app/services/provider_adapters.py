@@ -5,9 +5,9 @@ from typing import Protocol
 from app.agents.attraction_agent import search_attractions
 from app.agents.finance_agent import resolve_financial_context
 from app.agents.hotel_agent import resolve_hotel_anchor
-from app.agents.weather_agent import build_weather_constraints
+from app.agents.weather_agent import build_weather_report
 from app.core.config import settings
-from app.graph.state import FinancialContext, IntentConstraints, POICandidate, WeatherConstraint
+from app.graph.state import FinancialContext, IntentConstraints, POICandidate, WeatherReport
 
 
 class AttractionProvider(Protocol):
@@ -25,9 +25,9 @@ class HotelProvider(Protocol):
 
 
 class WeatherProvider(Protocol):
-    """Boundary for weather APIs that produce solver constraints."""
+    """Boundary for weather APIs that produce forecasts and solver constraints."""
 
-    def constraints(self, intent: IntentConstraints) -> list[WeatherConstraint]:
+    def report(self, intent: IntentConstraints) -> WeatherReport:
         ...
 
 
@@ -49,8 +49,8 @@ class LocalHotelProvider:
 
 
 class LocalWeatherProvider:
-    def constraints(self, intent: IntentConstraints) -> list[WeatherConstraint]:
-        return build_weather_constraints(intent)
+    def report(self, intent: IntentConstraints) -> WeatherReport:
+        return build_weather_report(intent)
 
 
 class LocalFinanceProvider:
@@ -75,8 +75,8 @@ class AmapHotelProvider:
 class AmapWeatherProvider:
     """Amap MCP-backed weather provider with local fallback inside the agent."""
 
-    def constraints(self, intent: IntentConstraints) -> list[WeatherConstraint]:
-        return build_weather_constraints(intent)
+    def report(self, intent: IntentConstraints) -> WeatherReport:
+        return build_weather_report(intent)
 
 
 class MCPFinanceProvider:

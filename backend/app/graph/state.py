@@ -134,9 +134,30 @@ class WeatherConstraint(BaseModel):
 
     time_window: tuple[str, str]
     rule: str
+    day: int | None = None
     blocked_categories: list[str] = Field(default_factory=list)
     block_outdoor: bool = False
     reason: str = ""
+
+
+class DailyWeatherForecast(BaseModel):
+    """User-facing weather forecast for one itinerary day."""
+
+    day: int
+    date: str = ""
+    weather: str = ""
+    temperature_min: float | None = None
+    temperature_max: float | None = None
+    wind: str = ""
+    advisory: str = ""
+    source: str = "fallback"
+
+
+class WeatherReport(BaseModel):
+    """Weather agent output consumed by both solver and planner renderer."""
+
+    constraints: list[WeatherConstraint] = Field(default_factory=list)
+    forecasts: list[DailyWeatherForecast] = Field(default_factory=list)
 
 
 class FinancialContext(BaseModel):
@@ -147,6 +168,7 @@ class FinancialContext(BaseModel):
     base_transit_fare: float = 4.0
     driving_rate_per_km: float = 2.6
     avg_meal_cost: float = 45.0
+    avg_hotel_nightly_cost: float = 80.0
 
 
 class POICandidate(BaseModel):
@@ -173,6 +195,9 @@ class MatrixEdge(BaseModel):
     duration_minutes: int
     mode: TransportMode
     cost: float
+    boarding_station: str = ""
+    alighting_station: str = ""
+    transit_note: str = ""
 
 
 class SpatialGraphData(BaseModel):
@@ -182,6 +207,7 @@ class SpatialGraphData(BaseModel):
     poi_candidates: list[POICandidate] = Field(default_factory=list)
     time_dependent_tensor: dict[str, MatrixEdge] = Field(default_factory=dict)
     weather_constraints: list[WeatherConstraint] = Field(default_factory=list)
+    weather_forecast: list[DailyWeatherForecast] = Field(default_factory=list)
 
 
 class RouteStop(BaseModel):
@@ -194,6 +220,20 @@ class RouteStop(BaseModel):
     inbound_mode: TransportMode | None = None
     inbound_cost: float = 0
     inbound_distance_km: float = 0
+    inbound_boarding_station: str = ""
+    inbound_alighting_station: str = ""
+    inbound_transit_note: str = ""
+
+
+class DayCostBreakdown(BaseModel):
+    """Per-day cost detail for route display and budget diagnostics."""
+
+    day: int
+    ticket_cost: float = 0
+    transport_cost: float = 0
+    food_cost: float = 0
+    accommodation_cost: float = 0
+    total_cost: float = 0
 
 
 class DayRoute(BaseModel):
@@ -204,6 +244,7 @@ class DayRoute(BaseModel):
     total_minutes: int
     total_cost: float
     fitness_score: float
+    cost_breakdown: DayCostBreakdown | None = None
     geometry: list[Coordinates] = Field(default_factory=list)
     bounds: BoundingBox | None = None
 
@@ -214,6 +255,7 @@ class BudgetBreakdown(BaseModel):
     fixed_cost: float = 0
     transport_cost: float = 0
     food_cost: float = 0
+    accommodation_cost: float = 0
     total_cost: float = 0
     budget_limit: float = 0
     remaining: float = 0
@@ -247,11 +289,25 @@ class RouteQualityMetrics(BaseModel):
     mode_share: dict[str, int] = Field(default_factory=dict)
 
 
+class HotelStay(BaseModel):
+    """Daily hotel stay information shown in the planner output."""
+
+    day: int
+    hotel: POICandidate
+    check_in_time: str
+    check_out_time: str
+    note: str = ""
+
+
 class RoutingSolution(BaseModel):
     """Final route, budget, warnings, and human-readable rendering."""
 
     optimized_route: list[DayRoute] = Field(default_factory=list)
     budget_breakdown: BudgetBreakdown = Field(default_factory=BudgetBreakdown)
+    daily_costs: list[DayCostBreakdown] = Field(default_factory=list)
+    hotel_anchor: POICandidate | None = None
+    hotel_stays: list[HotelStay] = Field(default_factory=list)
+    daily_weather: list[DailyWeatherForecast] = Field(default_factory=list)
     narrative: str = ""
     warnings: list[str] = Field(default_factory=list)
     repair_actions: list[BudgetRepairAction] = Field(default_factory=list)

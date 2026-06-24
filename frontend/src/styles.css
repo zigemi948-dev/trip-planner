@@ -127,6 +127,11 @@ button:disabled {
   background: #1d4ed8;
 }
 
+.hotel-legend {
+  border-radius: 3px;
+  background: #172033;
+}
+
 .amap-stop-marker {
   display: grid;
   place-items: center;
@@ -138,6 +143,21 @@ button:disabled {
   background: var(--marker-color, #1d4ed8);
   box-shadow: 0 3px 12px rgba(23, 32, 51, 0.28);
   font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.amap-hotel-marker {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 2px solid #ffffff;
+  border-radius: 8px;
+  color: #ffffff;
+  background: #172033;
+  box-shadow: 0 3px 12px rgba(23, 32, 51, 0.32);
+  font-size: 13px;
   font-weight: 900;
   cursor: pointer;
 }
@@ -232,6 +252,27 @@ button:disabled {
   gap: 16px;
 }
 
+.day-costs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.day-costs span,
+.day-costs strong {
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: #edf1f6;
+  color: #526174;
+  font-size: 12px;
+}
+
+.day-costs strong {
+  color: #172033;
+  background: #dbeafe;
+}
+
 ol {
   display: grid;
   gap: 10px;
@@ -249,6 +290,13 @@ time,
 small,
 dt {
   color: #66758a;
+}
+
+.transit-stations {
+  display: block;
+  margin-top: 3px;
+  color: #0f766e;
+  font-weight: 700;
 }
 
 .budget-total {
@@ -340,6 +388,29 @@ dd {
 
 .narrative p {
   white-space: pre-line;
+}
+
+.daily-details {
+  display: grid;
+  gap: 10px;
+}
+
+.daily-details article {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid #edf1f6;
+  padding-top: 10px;
+}
+
+.daily-details article:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.daily-details span {
+  color: #526174;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .events ul {

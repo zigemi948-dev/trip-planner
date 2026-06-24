@@ -73,6 +73,13 @@ def build_fallback_matrix(
             for hour in HOUR_RANGE:
                 driving_cost = road_km * financial.driving_rate_per_km * traffic_multiplier(hour)
                 mode = choose_mode(road_km, driving_cost, financial.base_transit_fare, hour)
+                boarding_station = ""
+                alighting_station = ""
+                transit_note = ""
+                if mode == TransportMode.transit:
+                    boarding_station = f"{origin.name} nearby transit stop"
+                    alighting_station = f"{destination.name} nearby transit stop"
+                    transit_note = f"Board at {boarding_station}; alight at {alighting_station}."
                 matrix[matrix_key(origin.id, destination.id, hour)] = MatrixEdge(
                     origin_id=origin.id,
                     destination_id=destination.id,
@@ -81,5 +88,8 @@ def build_fallback_matrix(
                     duration_minutes=_edge_duration(road_km, mode, hour),
                     mode=mode,
                     cost=round(_edge_cost(road_km, mode, financial, hour), 2),
+                    boarding_station=boarding_station,
+                    alighting_station=alighting_station,
+                    transit_note=transit_note,
                 )
     return matrix

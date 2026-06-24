@@ -2,11 +2,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from app.agents.planner_agent import render_narrative
-from app.algorithms.budget_evaluator import evaluate_budget
+from app.algorithms.budget_evaluator import build_daily_costs, evaluate_budget
 from app.algorithms.budget_pruner import remove_budget_candidate
 from app.algorithms.observability import build_fitness_curve, compute_route_quality
 from app.algorithms.vrp_solver import is_feasible_visit, solve_routes
-from app.graph.state import GraphStatus, RoutingSolution, TripState
+from app.graph.state import GraphStatus, HotelStay, RoutingSolution, TripState, WeatherReport
 from app.services.matrix_service import build_time_dependent_matrix_with_source
 from app.services.provider_adapters import provider_registry
 
@@ -25,7 +25,7 @@ def map_agents_node(state: TripState) -> TripState:
         "finance_agent": lambda: provider_registry.finance.context(state.intent_constraints),
         "hotel_agent": lambda: provider_registry.hotels.resolve_anchor(state.intent_constraints),
         "attraction_agent": lambda: provider_registry.attractions.search(state.intent_constraints),
-        "weather_agent": lambda: provider_registry.weather.constraints(state.intent_constraints),
+        "weather_agent": lambda: provider_registry.weather.report(state.intent_constraints),
     }
     results: dict[str, Any] = {}
     with ThreadPoolExecutor(max_workers=len(agent_calls)) as executor:
@@ -37,7 +37,10 @@ def map_agents_node(state: TripState) -> TripState:
             name, value = future.result()
             results[name] = value
             payload: dict[str, Any] = {}
-            if isinstance(value, list):
+            if isinstance(value, WeatherReport):
+                payload["constraints"] = len(value.constraints)
+                payload["forecasts"] = len(value.forecasts)
+            elif isinstance(value, list):
                 payload["count"] = len(value)
             elif hasattr(value, "model_dump"):
                 payload["type"] = value.__class__.__name__
@@ -46,7 +49,9 @@ def map_agents_node(state: TripState) -> TripState:
     state.financial_context = results["finance_agent"]
     state.spatial_graph_data.hotel_anchor = results["hotel_agent"]
     state.spatial_graph_data.poi_candidates = results["attraction_agent"]
-    state.spatial_graph_data.weather_constraints = results["weather_agent"]
+    weather_report: WeatherReport = results["weather_agent"]
+    state.spatial_graph_data.weather_constraints = weather_report.constraints
+    state.spatial_graph_data.weather_forecast = weather_report.forecasts
     poi_source = "amap" if any(poi.id.startswith("amap_") for poi in state.spatial_graph_data.poi_candidates) else "local"
     local_hotel_name = f"{state.intent_constraints.destination} Central Hotel"
     hotel_source = "amap" if (
@@ -62,7 +67,10 @@ def map_agents_node(state: TripState) -> TripState:
     )
     state.emit(
         "weather_constraints",
-        {"count": len(state.spatial_graph_data.weather_constraints)},
+        {
+            "count": len(state.spatial_graph_data.weather_constraints),
+            "forecast_days": len(state.spatial_graph_data.weather_forecast),
+        },
     )
     state.graph_controls.current_status = GraphStatus.mapped
     return state
@@ -125,6 +133,13 @@ def budget_evaluator_node(state: TripState) -> TripState:
                     f"{stop.poi.name} may violate opening hours or weather constraints on day {route.day}."
                 )
     state.routing_solution.budget_breakdown = budget
+    daily_costs = build_daily_costs(state.routing_solution.optimized_route, state.financial_context)
+    state.routing_solution.daily_costs = daily_costs
+    costs_by_day = {item.day: item for item in daily_costs}
+    state.routing_solution.optimized_route = [
+        route.model_copy(update={"cost_breakdown": costs_by_day.get(route.day)})
+        for route in state.routing_solution.optimized_route
+    ]
     state.routing_solution.warnings = warnings
     state.routing_solution.quality_metrics = compute_route_quality(
         state.routing_solution.optimized_route,
@@ -177,6 +192,10 @@ def planner_reduce_node(state: TripState) -> TripState:
     solution = RoutingSolution(
         optimized_route=state.routing_solution.optimized_route,
         budget_breakdown=state.routing_solution.budget_breakdown,
+        daily_costs=state.routing_solution.daily_costs,
+        hotel_anchor=state.spatial_graph_data.hotel_anchor,
+        hotel_stays=_build_hotel_stays(state),
+        daily_weather=state.spatial_graph_data.weather_forecast,
         warnings=state.routing_solution.warnings,
         repair_actions=state.routing_solution.repair_actions,
         quality_metrics=state.routing_solution.quality_metrics,
@@ -187,3 +206,26 @@ def planner_reduce_node(state: TripState) -> TripState:
     state.graph_controls.current_status = GraphStatus.rendered
     state.emit("rendered", {"chars": len(solution.narrative)})
     return state
+
+
+def _build_hotel_stays(state: TripState) -> list[HotelStay]:
+    hotel = state.spatial_graph_data.hotel_anchor
+    if hotel is None:
+        return []
+    day_start = state.intent_constraints.time_window_baseline[0]
+    day_end = state.intent_constraints.time_window_baseline[1]
+    stays: list[HotelStay] = []
+    for route in state.routing_solution.optimized_route:
+        note = "Check out for the day route, then return after the last stop."
+        if route.stops:
+            note = f"Return after {route.stops[-1].departure_time} from {route.stops[-1].poi.name}."
+        stays.append(
+            HotelStay(
+                day=route.day,
+                hotel=hotel,
+                check_in_time="Previous night" if route.day > 1 else f"Before {day_start}",
+                check_out_time=day_start,
+                note=f"{note} Planned rest window starts around {day_end}.",
+            )
+        )
+    return stays

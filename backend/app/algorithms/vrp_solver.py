@@ -275,6 +275,9 @@ def _evaluate_sequence(
                 inbound_mode=inbound.mode if inbound else TransportMode.walking,
                 inbound_cost=inbound.cost if inbound else 0,
                 inbound_distance_km=inbound.distance_km if inbound else 0,
+                inbound_boarding_station=inbound.boarding_station if inbound else "",
+                inbound_alighting_station=inbound.alighting_station if inbound else "",
+                inbound_transit_note=inbound.transit_note if inbound else "",
             )
         )
         total_cost += poi.fixed_cost + (inbound.cost if inbound else 0)

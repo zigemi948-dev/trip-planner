@@ -32,6 +32,10 @@ const events = computed(() => {
   const streamEvents = store.streamEvents.slice(-8);
   return streamEvents.length ? streamEvents : store.trip?.graph_controls.events.slice(-8) ?? [];
 });
+const hotelStayByDay = computed(() => {
+  const entries = solution.value?.hotel_stays ?? [];
+  return new Map(entries.map((stay) => [stay.day, stay]));
+});
 
 const libraryPoi: POICandidate = {
   id: 'poi_library',
@@ -62,6 +66,19 @@ async function parseRequest() {
   form.time_window_baseline = parsed.time_window_baseline ?? ['09:00', '19:00'];
   form.budget_limit = parsed.budget_limit;
   form.preferences = parsed.preferences;
+}
+
+function temperatureLabel(min: number | null, max: number | null): string {
+  if (min !== null && max !== null) {
+    return `${Math.round(min)}-${Math.round(max)} C`;
+  }
+  if (max !== null) {
+    return `${Math.round(max)} C`;
+  }
+  if (min !== null) {
+    return `${Math.round(min)} C`;
+  }
+  return 'Temp unavailable';
 }
 </script>
 
@@ -152,7 +169,7 @@ async function parseRequest() {
     </aside>
 
     <section class="main-stage">
-      <MapViewer :routes="solution?.optimized_route ?? []" />
+      <MapViewer :routes="solution?.optimized_route ?? []" :hotel="solution?.hotel_anchor ?? null" />
       <div class="lower-grid">
         <RouteEditor :routes="solution?.optimized_route ?? []" />
         <BudgetDashboard
@@ -160,6 +177,24 @@ async function parseRequest() {
           :budget="solution.budget_breakdown"
         />
       </div>
+      <section v-if="solution" class="panel daily-details">
+        <h2>Daily Conditions</h2>
+        <article v-for="forecast in solution.daily_weather" :key="forecast.day">
+          <strong>
+            Day {{ forecast.day }} {{ forecast.date ? `- ${forecast.date}` : '' }}
+          </strong>
+          <span>
+            Weather: {{ forecast.weather || 'unknown' }} - {{ temperatureLabel(forecast.temperature_min, forecast.temperature_max) }}
+            <template v-if="forecast.wind"> - Wind {{ forecast.wind }}</template>
+          </span>
+          <span v-if="forecast.advisory">{{ forecast.advisory }}</span>
+          <span v-if="hotelStayByDay.get(forecast.day)">
+            Hotel: {{ hotelStayByDay.get(forecast.day)?.hotel.name }}
+            - check-in {{ hotelStayByDay.get(forecast.day)?.check_in_time }}
+            - depart {{ hotelStayByDay.get(forecast.day)?.check_out_time }}
+          </span>
+        </article>
+      </section>
       <SolverMonitor
         v-if="solution"
         :metrics="solution.quality_metrics"

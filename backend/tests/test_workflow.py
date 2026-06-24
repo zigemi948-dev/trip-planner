@@ -80,6 +80,28 @@ def test_mode_choice_downgrades_expensive_driving_to_transit():
     assert mode == TransportMode.transit
 
 
+def test_fallback_transit_edges_include_boarding_and_alighting_stations():
+    origin = POICandidate(
+        id="origin",
+        name="Origin Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.2300, lng=121.4700),
+    )
+    destination = POICandidate(
+        id="destination",
+        name="Far Museum",
+        category="museum",
+        coordinates=Coordinates(lat=31.3000, lng=121.5600),
+    )
+
+    matrix = build_fallback_matrix([origin, destination], FinancialContext())
+    transit_edges = [edge for edge in matrix.values() if edge.mode == TransportMode.transit]
+
+    assert transit_edges
+    assert transit_edges[0].boarding_station == "Origin Hotel nearby transit stop"
+    assert transit_edges[0].alighting_station == "Far Museum nearby transit stop"
+
+
 def test_capacity_clustering_respects_daily_visit_and_commute_demand():
     pois = [
         POICandidate(
@@ -203,6 +225,45 @@ def test_rule_intent_parser_extracts_english_trip_constraints():
     assert "shopping" in intent.preferences
 
 
+def test_rule_intent_parser_extracts_richer_chinese_preferences():
+    intent = parse_trip_intent("去成都玩三天，人均1500以内，想要亲子、夜景、购物和室内避雨，10点到20点")
+
+    assert intent.destination == "Chengdu"
+    assert intent.days == 3
+    assert intent.budget_limit == 1500
+    assert intent.time_window_baseline == ("10:00", "20:00")
+    assert {"family", "nightlife", "shopping", "indoor"} <= set(intent.preferences)
+
+
+def test_rule_intent_parser_extracts_popular_city_and_new_preferences():
+    intent = parse_trip_intent("三亚4天预算3000，想看海、拍照、温泉和慢节奏度假，10:30-19:00")
+
+    assert intent.destination == "Sanya"
+    assert intent.days == 4
+    assert intent.budget_limit == 3000
+    assert intent.time_window_baseline == ("10:30", "19:00")
+    assert {"beach", "photography", "hot_spring", "relax"} <= set(intent.preferences)
+
+
+def test_intent_parser_falls_back_when_llm_payload_is_invalid(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.agents.intent_agent.llm_is_enabled", lambda: True)
+    monkeypatch.setattr(
+        "app.agents.intent_agent.complete_json",
+        lambda *_args, **_kwargs: {
+            "destination": "",
+            "days": 0,
+            "budget_limit": "eight hundred yuan",
+            "preferences": "food",
+        },
+    )
+
+    intent = parse_trip_intent("去长沙玩2天，预算800元")
+
+    assert intent.destination == "Changsha"
+    assert intent.days == 2
+    assert intent.budget_limit == 800
+
+
 def test_amap_poi_payload_maps_to_candidate():
     poi = _poi_from_amap(
         {
@@ -290,6 +351,24 @@ def test_amap_agents_read_geo_facts_through_mcp_layer(monkeypatch: pytest.Monkey
                     "reason": "amap_heat:test",
                 }
             ]
+        if name == "maps_geo":
+            return {"results": [{"adcode": "310000", "city": "上海市"}]}
+        if name == "maps_weather":
+            return {
+                "forecasts": [
+                    {
+                        "casts": [
+                            {
+                                "date": "2026-06-25",
+                                "dayweather": "晴",
+                                "nighttemp": "24",
+                                "daytemp": "31",
+                                "daywind": "东南",
+                            }
+                        ]
+                    }
+                ]
+            }
         raise MCPToolError(f"unexpected tool {name}")
 
     monkeypatch.setattr("app.services.geo_fact_service.call_tool", fake_tool)
@@ -299,13 +378,22 @@ def test_amap_agents_read_geo_facts_through_mcp_layer(monkeypatch: pytest.Monkey
 
     pois = provider_adapters.AmapAttractionProvider().search(intent)
     hotel = provider_adapters.AmapHotelProvider().resolve_anchor(intent)
-    constraints = provider_adapters.AmapWeatherProvider().constraints(intent)
+    weather = provider_adapters.AmapWeatherProvider().report(intent)
 
     assert pois[0].id == "amap_test"
     assert hotel.name == "Amap Hotel"
-    assert constraints[0].reason == "amap_heat:test"
-    assert [name for name, _ in calls] == ["amap_poi_search", "amap_hotel_anchor", "amap_weather_constraints"]
-    assert all(arguments["city"] == "上海" for _, arguments in calls)
+    assert weather.constraints[0].reason == "amap_heat:test"
+    assert weather.forecasts[0].weather == "晴"
+    assert [name for name, _ in calls] == [
+        "amap_poi_search",
+        "amap_hotel_anchor",
+        "amap_weather_constraints",
+        "amap_weather_constraints",
+        "maps_geo",
+        "maps_weather",
+    ]
+    assert all(arguments["city"] == "上海" for name, arguments in calls if name.startswith("amap_"))
+    assert weather.constraints[0].day is None
 
 
 def test_amap_geo_facts_can_read_official_mcp_text_search(monkeypatch: pytest.MonkeyPatch):
@@ -416,6 +504,15 @@ def test_workflow_returns_rendered_solution():
     assert state.routing_solution.optimized_route[0].bounds is not None
     assert state.routing_solution.quality_metrics.total_stops > 0
     assert state.routing_solution.fitness_curve
+    assert state.routing_solution.hotel_anchor is not None
+    assert len(state.routing_solution.hotel_stays) == 2
+    assert len(state.routing_solution.daily_weather) == 2
+    assert len(state.routing_solution.daily_costs) == 2
+    assert state.routing_solution.budget_breakdown.accommodation_cost > 0
+    assert state.routing_solution.optimized_route[0].cost_breakdown is not None
+    assert "Weather:" in state.routing_solution.narrative
+    assert "Hotel:" in state.routing_solution.narrative
+    assert "Daily cost:" in state.routing_solution.narrative
     assert any(event["event"] == "provider_status" for event in state.graph_controls.events)
     matrix_events = [event for event in state.graph_controls.events if event["event"] == "matrix_ready"]
     assert matrix_events

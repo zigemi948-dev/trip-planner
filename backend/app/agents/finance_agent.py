@@ -16,4 +16,5 @@ def resolve_financial_context(intent: IntentConstraints) -> FinancialContext:
         base_transit_fare=4.0,
         driving_rate_per_km=2.6,
         avg_meal_cost=45.0,
+        avg_hotel_nightly_cost=80.0,
     )

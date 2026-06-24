@@ -7,7 +7,6 @@ defineProps<{
 </script>
 
 <template>
-  <!-- Compact budget ledger matching the backend BudgetBreakdown fields. -->
   <section class="panel budget">
     <h2>Budget</h2>
     <div class="budget-total">
@@ -15,6 +14,10 @@ defineProps<{
       <span>/ ¥{{ budget.budget_limit.toFixed(2) }}</span>
     </div>
     <dl>
+      <div>
+        <dt>Hotel</dt>
+        <dd>¥{{ budget.accommodation_cost.toFixed(2) }}</dd>
+      </div>
       <div>
         <dt>Tickets</dt>
         <dd>¥{{ budget.fixed_cost.toFixed(2) }}</dd>

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.core.config import settings
-from app.graph.state import Coordinates, FinancialContext, MatrixEdge, POICandidate, WeatherConstraint
+from app.graph.state import Coordinates, DailyWeatherForecast, FinancialContext, MatrixEdge, POICandidate, WeatherConstraint
 from app.services.mcp_client import MCPToolError, call_tool
 
 
@@ -26,6 +26,7 @@ AMAP_CITY_ALIASES = {
 OFFICIAL_AMAP_TEXT_SEARCH_TOOL = "maps_text_search"
 OFFICIAL_AMAP_SEARCH_DETAIL_TOOL = "maps_search_detail"
 OFFICIAL_AMAP_GEO_TOOL = "maps_geo"
+OFFICIAL_AMAP_WEATHER_TOOL = "maps_weather"
 
 OFFICIAL_KEYWORDS = {
     "museum": ["museum"],
@@ -112,6 +113,32 @@ def fetch_weather_constraint_facts(city: str) -> list[WeatherConstraint]:
         return [WeatherConstraint.model_validate(item) for item in payload or []]
     except (MCPToolError, ValueError, TypeError) as exc:
         raise GeoFactUnavailableError(str(exc)) from exc
+
+
+def fetch_weather_forecast_facts(city: str, days: int) -> list[DailyWeatherForecast]:
+    """Fetch user-facing multi-day weather facts from Amap MCP."""
+    _require_amap_mode()
+    errors: list[str] = []
+    try:
+        payload = call_tool(settings.amap_mcp_weather_tool, {"city": normalize_amap_city(city), "days": days})
+        forecasts = _coerce_weather_forecasts(payload, days, source="amap:mcp")
+        if forecasts:
+            return forecasts
+    except (MCPToolError, ValueError, TypeError) as exc:
+        errors.append(str(exc))
+
+    try:
+        city_context = _official_city_context(city)
+        city_value = city_context.get("adcode") or city_context.get("city") or city
+        payload = call_tool(OFFICIAL_AMAP_WEATHER_TOOL, {"city": city_value})
+        forecasts = _coerce_weather_forecasts(payload, days, source="amap:official-mcp")
+        if forecasts:
+            return forecasts
+    except (MCPToolError, ValueError, TypeError) as exc:
+        errors.append(str(exc))
+
+    detail = f": {'; '.join(errors)}" if errors else ""
+    raise GeoFactUnavailableError(f"Amap MCP returned no weather forecast{detail}")
 
 
 def build_time_dependent_matrix_facts(
@@ -335,3 +362,104 @@ def _float_or_default(value: object, default: float) -> float:
         return float(str(value))
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_weather_forecasts(payload: object, days: int, source: str) -> list[DailyWeatherForecast]:
+    if isinstance(payload, list):
+        forecasts = []
+        for index, item in enumerate(payload[:days], start=1):
+            if isinstance(item, DailyWeatherForecast):
+                forecasts.append(item)
+                continue
+            if isinstance(item, dict):
+                forecast = _forecast_from_dict(item, day=index, source=source)
+                if forecast is not None:
+                    forecasts.append(forecast)
+        return forecasts
+
+    if not isinstance(payload, dict):
+        return []
+
+    forecasts: list[DailyWeatherForecast] = []
+    for forecast_group in payload.get("forecasts") or []:
+        if not isinstance(forecast_group, dict):
+            continue
+        casts = forecast_group.get("casts") or []
+        if isinstance(casts, list):
+            for index, item in enumerate(casts[:days], start=1):
+                if isinstance(item, dict):
+                    forecast = _forecast_from_amap_cast(item, day=index, source=source)
+                    if forecast is not None:
+                        forecasts.append(forecast)
+    if forecasts:
+        return forecasts[:days]
+
+    lives = payload.get("lives") or []
+    if isinstance(lives, list) and lives:
+        live = lives[0]
+        if isinstance(live, dict):
+            forecast = _forecast_from_live_weather(live, source=source)
+            return [forecast] if forecast is not None else []
+
+    return []
+
+
+def _forecast_from_amap_cast(item: dict, day: int, source: str) -> DailyWeatherForecast | None:
+    weather = str(item.get("dayweather") or item.get("nightweather") or item.get("weather") or "")
+    temp_min = _optional_float(item.get("nighttemp") or item.get("temperature_min"))
+    temp_max = _optional_float(item.get("daytemp") or item.get("temperature_max"))
+    return DailyWeatherForecast(
+        day=day,
+        date=str(item.get("date") or ""),
+        weather=weather,
+        temperature_min=temp_min,
+        temperature_max=temp_max,
+        wind=str(item.get("daywind") or item.get("nightwind") or item.get("wind") or ""),
+        advisory=_weather_advisory(weather, temp_min, temp_max),
+        source=source,
+    )
+
+
+def _forecast_from_live_weather(item: dict, source: str) -> DailyWeatherForecast | None:
+    weather = str(item.get("weather") or "")
+    temperature = _optional_float(item.get("temperature"))
+    return DailyWeatherForecast(
+        day=1,
+        weather=weather,
+        temperature_min=temperature,
+        temperature_max=temperature,
+        wind=str(item.get("winddirection") or item.get("windpower") or ""),
+        advisory=_weather_advisory(weather, temperature, temperature),
+        source=source,
+    )
+
+
+def _forecast_from_dict(item: dict, day: int, source: str) -> DailyWeatherForecast | None:
+    if "time_window" in item and "rule" in item and not {"weather", "dayweather", "temperature"}.intersection(item):
+        return None
+    try:
+        return DailyWeatherForecast.model_validate({**item, "day": item.get("day") or day, "source": item.get("source") or source})
+    except ValueError:
+        return _forecast_from_amap_cast(item, day=day, source=source)
+
+
+def _optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _weather_advisory(weather: str, temp_min: float | None, temp_max: float | None) -> str:
+    lowered = weather.lower()
+    if any(token in weather for token in ("雨", "雪", "雷")) or any(
+        token in lowered for token in ("rain", "snow", "storm")
+    ):
+        return "Prefer indoor stops and carry rain gear."
+    if temp_max is not None and temp_max >= 34:
+        return "Avoid long outdoor visits in the afternoon heat."
+    if temp_min is not None and temp_min <= 5:
+        return "Dress warmly and keep outdoor stays short."
+    return "Suitable for regular sightseeing."

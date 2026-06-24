@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { Coordinates, DayRoute, RouteStop } from '../types/trip';
+import type { Coordinates, DayRoute, POICandidate, RouteStop } from '../types/trip';
 
 type AMapLngLat = [number, number];
 
@@ -79,6 +79,7 @@ declare global {
 
 const props = defineProps<{
   routes: DayRoute[];
+  hotel?: POICandidate | null;
 }>();
 
 const mapContainer = ref<HTMLDivElement | null>(null);
@@ -106,7 +107,7 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => props.routes,
+  () => [props.routes, props.hotel],
   () => {
     if (!map || !mapReady.value) {
       return;
@@ -211,6 +212,7 @@ function renderRoutes() {
   }
   clearOverlays();
   renderRouteLines(window.AMap);
+  renderHotelMarker(window.AMap);
   renderMarkers(window.AMap);
   fitToRoutes();
 }
@@ -282,6 +284,36 @@ function renderMarkers(amap: AMapNamespace) {
   });
 }
 
+function renderHotelMarker(amap: AMapNamespace) {
+  if (!map || !props.hotel) {
+    return;
+  }
+  const currentMap = map;
+  const markerNode = document.createElement('button');
+  markerNode.type = 'button';
+  markerNode.className = 'amap-hotel-marker';
+  markerNode.textContent = 'H';
+  markerNode.setAttribute('aria-label', `Hotel ${props.hotel.name}`);
+
+  const position = toLngLat(props.hotel.coordinates);
+  const marker = new amap.Marker({
+    anchor: 'center',
+    content: markerNode,
+    offset: new amap.Pixel(0, 0),
+    position,
+    zIndex: 40
+  });
+  marker.on('click', () => {
+    if (!infoWindow || !props.hotel) {
+      return;
+    }
+    infoWindow.setContent(hotelPopupHtml(props.hotel));
+    infoWindow.open(currentMap, position);
+  });
+  marker.setMap(currentMap);
+  markers.push(marker);
+}
+
 function fitToRoutes() {
   if (!map) {
     return;
@@ -315,10 +347,14 @@ function routeCoordinates(route: DayRoute): Coordinates[] {
 }
 
 function allCoordinates(): Coordinates[] {
-  return props.routes.flatMap((route) => [
+  const coordinates = props.routes.flatMap((route) => [
     ...routeCoordinates(route),
     ...route.stops.map((stop) => stop.poi.coordinates)
   ]);
+  if (props.hotel) {
+    coordinates.push(props.hotel.coordinates);
+  }
+  return coordinates;
 }
 
 function defaultCenter(): AMapLngLat {
@@ -345,6 +381,16 @@ function popupHtml(route: DayRoute, stop: RouteStop, stopIndex: number): string 
   `;
 }
 
+function hotelPopupHtml(hotel: POICandidate): string {
+  return `
+    <div class="amap-popup-content">
+      <strong>入住酒店 ${escapeHtml(hotel.name)}</strong>
+      <span>${escapeHtml(hotel.category)}</span>
+      <span>${hotel.coordinates.lng.toFixed(5)}, ${hotel.coordinates.lat.toFixed(5)}</span>
+    </div>
+  `;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -365,6 +411,10 @@ function escapeHtml(value: string): string {
       {{ mapError }}
     </div>
     <div class="map-legend">
+      <span v-if="hotel">
+        <i class="legend-color hotel-legend"></i>
+        Hotel
+      </span>
       <span v-for="(route, index) in routes" :key="route.day">
         <i class="legend-color" :style="{ background: routeColors[index % routeColors.length] }"></i>
         Day {{ route.day }}
