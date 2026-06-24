@@ -98,7 +98,7 @@ def vrp_solver_node(state: TripState) -> TripState:
     state.routing_solution.optimized_route = routes
     state.graph_controls.current_status = GraphStatus.solved
     for route in routes:
-        state.emit("solver_epoch", {"day": route.day, "fitness": route.fitness_score})
+        state.emit("solver_epoch", {"day": route.day, "fitness": route.fitness_score, "algorithm": "NSGA-II"})
     state.routing_solution.fitness_curve = build_fitness_curve(routes)
     return state
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import permutations
+from random import Random
 
 from app.algorithms.clustering import cluster_by_day
 from app.algorithms.geometry import attach_route_geometry
@@ -19,8 +20,10 @@ from app.graph.state import (
 
 
 TIME_FORMAT = "%H:%M"
-MAX_EXACT_PERMUTATION_SIZE = 7
-MAX_MUTATED_SEQUENCES = 80
+MAX_EXACT_PERMUTATION_SIZE = 5
+NSGA_POPULATION_SIZE = 32
+NSGA_GENERATIONS = 14
+NSGA_MUTATION_RATE = 0.22
 TIME_PENALTY_WEIGHT = 1 / 600
 COST_PENALTY_WEIGHT = 1 / 500
 
@@ -35,6 +38,16 @@ class RouteCandidate:
     utility: float
     skipped_count: int
     fitness_score: float
+
+
+@dataclass
+class NSGAIndividual:
+    """One NSGA-II chromosome with evaluated route objectives."""
+
+    sequence: list[POICandidate]
+    candidate: RouteCandidate
+    rank: int = 0
+    crowding_distance: float = 0.0
 
 
 def add_minutes(time_text: str, minutes: int) -> str:
@@ -180,7 +193,7 @@ def _candidate_sequences(
     day_start: str,
     constraints: list[WeatherConstraint],
 ) -> list[list[POICandidate]]:
-    """Build a compact deterministic route population for NSGA-II-style scoring."""
+    """Build a deterministic seed population for NSGA-II."""
     if not pois:
         return []
 
@@ -193,32 +206,34 @@ def _candidate_sequences(
     ]
 
     sequences: list[list[POICandidate]] = []
-    seen: set[tuple[str, ...]] = set()
-
-    def add_sequence(sequence: list[POICandidate]) -> None:
-        key = _sequence_key(sequence)
-        if key not in seen:
-            seen.add(key)
-            sequences.append(sequence)
-
     for sequence in base_sequences:
-        add_sequence(list(sequence))
+        _add_unique_sequence(sequences, list(sequence))
 
     if len(pois) <= MAX_EXACT_PERMUTATION_SIZE:
         for sequence in permutations(pois):
-            add_sequence(list(sequence))
-    else:
-        for sequence in list(sequences):
-            if len(sequences) >= MAX_MUTATED_SEQUENCES:
-                break
-            for index in range(len(sequence) - 1):
-                mutated = list(sequence)
-                mutated[index], mutated[index + 1] = mutated[index + 1], mutated[index]
-                add_sequence(mutated)
-                if len(sequences) >= MAX_MUTATED_SEQUENCES:
-                    break
+            _add_unique_sequence(sequences, list(sequence))
 
-    return sequences[:MAX_MUTATED_SEQUENCES]
+    rng = _rng_for_pois(pois, day_start)
+    attempts = 0
+    max_attempts = NSGA_POPULATION_SIZE * 6
+    while len(sequences) < NSGA_POPULATION_SIZE and attempts < max_attempts:
+        seed = list(sequences[len(sequences) % len(sequences)])
+        _mutate_sequence(seed, rng, force=True)
+        _add_unique_sequence(sequences, seed)
+        attempts += 1
+
+    return sequences[:NSGA_POPULATION_SIZE]
+
+
+def _add_unique_sequence(sequences: list[list[POICandidate]], sequence: list[POICandidate]) -> None:
+    key = _sequence_key(sequence)
+    if key not in {_sequence_key(item) for item in sequences}:
+        sequences.append(sequence)
+
+
+def _rng_for_pois(pois: list[POICandidate], salt: str = "") -> Random:
+    seed_text = "|".join(sorted(poi.id for poi in pois)) + f"|{salt}"
+    return Random(seed_text)
 
 
 def _evaluate_sequence(
@@ -309,6 +324,200 @@ def _pareto_front(candidates: list[RouteCandidate]) -> list[RouteCandidate]:
     ]
 
 
+def _run_nsga2(
+    hotel: POICandidate,
+    cluster: list[POICandidate],
+    matrix: dict[str, MatrixEdge],
+    day_start: str,
+    day_end: str,
+    constraints: list[WeatherConstraint],
+) -> list[NSGAIndividual]:
+    """Run deterministic NSGA-II for one day-level TD-VRPTW cluster."""
+    sequences = _candidate_sequences(hotel, cluster, matrix, day_start, constraints)
+    if not sequences:
+        return []
+
+    rng = _rng_for_pois(cluster, f"{day_start}-{day_end}")
+    population = _evaluate_population(hotel, sequences, matrix, day_start, day_end, constraints)
+    population = _select_next_generation(population, NSGA_POPULATION_SIZE)
+
+    for _ in range(NSGA_GENERATIONS):
+        parents = _rank_population(population)
+        offspring_sequences: list[list[POICandidate]] = []
+        attempts = 0
+        max_attempts = NSGA_POPULATION_SIZE * 6
+        while len(offspring_sequences) < NSGA_POPULATION_SIZE and attempts < max_attempts:
+            left = _tournament_select(parents, rng)
+            right = _tournament_select(parents, rng)
+            child = _order_crossover(left.sequence, right.sequence, rng)
+            _mutate_sequence(child, rng)
+            _add_unique_sequence(offspring_sequences, child)
+            attempts += 1
+        offspring = _evaluate_population(hotel, offspring_sequences, matrix, day_start, day_end, constraints)
+        population = _select_next_generation([*population, *offspring], NSGA_POPULATION_SIZE)
+
+    return _rank_population(population)
+
+
+def _evaluate_population(
+    hotel: POICandidate,
+    sequences: list[list[POICandidate]],
+    matrix: dict[str, MatrixEdge],
+    day_start: str,
+    day_end: str,
+    constraints: list[WeatherConstraint],
+) -> list[NSGAIndividual]:
+    seen: set[tuple[str, ...]] = set()
+    individuals: list[NSGAIndividual] = []
+    for sequence in sequences:
+        key = _sequence_key(sequence)
+        if key in seen:
+            continue
+        seen.add(key)
+        individuals.append(
+            NSGAIndividual(
+                sequence=list(sequence),
+                candidate=_evaluate_sequence(hotel, sequence, matrix, day_start, day_end, constraints),
+            )
+        )
+    return individuals
+
+
+def _rank_population(individuals: list[NSGAIndividual]) -> list[NSGAIndividual]:
+    fronts = _non_dominated_sort(individuals)
+    ranked: list[NSGAIndividual] = []
+    for rank, front in enumerate(fronts):
+        for individual in front:
+            individual.rank = rank
+        _assign_crowding_distance(front)
+        ranked.extend(front)
+    return sorted(ranked, key=lambda item: (item.rank, -item.crowding_distance, -item.candidate.fitness_score))
+
+
+def _select_next_generation(individuals: list[NSGAIndividual], population_size: int) -> list[NSGAIndividual]:
+    selected: list[NSGAIndividual] = []
+    for front in _non_dominated_sort(individuals):
+        _assign_crowding_distance(front)
+        if len(selected) + len(front) <= population_size:
+            selected.extend(front)
+            continue
+        remaining = population_size - len(selected)
+        selected.extend(
+            sorted(front, key=lambda item: (-item.crowding_distance, -item.candidate.fitness_score))[:remaining]
+        )
+        break
+    return _rank_population(selected)
+
+
+def _non_dominated_sort(individuals: list[NSGAIndividual]) -> list[list[NSGAIndividual]]:
+    domination_counts: dict[int, int] = {index: 0 for index in range(len(individuals))}
+    dominated_sets: dict[int, list[int]] = {index: [] for index in range(len(individuals))}
+    fronts: list[list[int]] = [[]]
+
+    for left_index, left in enumerate(individuals):
+        for right_index, right in enumerate(individuals):
+            if left_index == right_index:
+                continue
+            if _dominates(left.candidate, right.candidate):
+                dominated_sets[left_index].append(right_index)
+            elif _dominates(right.candidate, left.candidate):
+                domination_counts[left_index] += 1
+        if domination_counts[left_index] == 0:
+            fronts[0].append(left_index)
+
+    front_index = 0
+    while front_index < len(fronts) and fronts[front_index]:
+        next_front: list[int] = []
+        for left_index in fronts[front_index]:
+            for right_index in dominated_sets[left_index]:
+                domination_counts[right_index] -= 1
+                if domination_counts[right_index] == 0:
+                    next_front.append(right_index)
+        if next_front:
+            fronts.append(next_front)
+        front_index += 1
+
+    return [[individuals[index] for index in front] for front in fronts if front]
+
+
+def _assign_crowding_distance(front: list[NSGAIndividual]) -> None:
+    if not front:
+        return
+    for individual in front:
+        individual.crowding_distance = 0.0
+    if len(front) <= 2:
+        for individual in front:
+            individual.crowding_distance = float("inf")
+        return
+
+    objective_getters = [
+        lambda item: item.candidate.utility,
+        lambda item: -item.candidate.total_minutes,
+        lambda item: -item.candidate.total_cost,
+        lambda item: -item.candidate.skipped_count,
+    ]
+    for getter in objective_getters:
+        ordered = sorted(front, key=getter)
+        ordered[0].crowding_distance = float("inf")
+        ordered[-1].crowding_distance = float("inf")
+        minimum = getter(ordered[0])
+        maximum = getter(ordered[-1])
+        if maximum == minimum:
+            continue
+        for index in range(1, len(ordered) - 1):
+            if ordered[index].crowding_distance == float("inf"):
+                continue
+            ordered[index].crowding_distance += (getter(ordered[index + 1]) - getter(ordered[index - 1])) / (
+                maximum - minimum
+            )
+
+
+def _tournament_select(population: list[NSGAIndividual], rng: Random) -> NSGAIndividual:
+    left = population[rng.randrange(len(population))]
+    right = population[rng.randrange(len(population))]
+    if (left.rank, -left.crowding_distance, -left.candidate.fitness_score) < (
+        right.rank,
+        -right.crowding_distance,
+        -right.candidate.fitness_score,
+    ):
+        return left
+    return right
+
+
+def _order_crossover(
+    left: list[POICandidate],
+    right: list[POICandidate],
+    rng: Random,
+) -> list[POICandidate]:
+    if len(left) <= 2:
+        return list(left)
+    start = rng.randrange(0, len(left) - 1)
+    end = rng.randrange(start + 1, len(left))
+    child: list[POICandidate | None] = [None for _ in left]
+    child[start : end + 1] = left[start : end + 1]
+    used = {poi.id for poi in child if poi is not None}
+    fill_values = [poi for poi in right if poi.id not in used]
+    fill_index = 0
+    for index, value in enumerate(child):
+        if value is None:
+            child[index] = fill_values[fill_index]
+            fill_index += 1
+    return [poi for poi in child if poi is not None]
+
+
+def _mutate_sequence(sequence: list[POICandidate], rng: Random, force: bool = False) -> None:
+    if len(sequence) < 2:
+        return
+    if force or rng.random() < NSGA_MUTATION_RATE:
+        left = rng.randrange(len(sequence))
+        right = rng.randrange(len(sequence))
+        sequence[left], sequence[right] = sequence[right], sequence[left]
+    if len(sequence) > 3 and (force or rng.random() < NSGA_MUTATION_RATE / 2):
+        start = rng.randrange(0, len(sequence) - 2)
+        end = rng.randrange(start + 1, len(sequence))
+        sequence[start : end + 1] = reversed(sequence[start : end + 1])
+
+
 def _solve_day_route(
     day: int,
     hotel: POICandidate,
@@ -318,15 +527,12 @@ def _solve_day_route(
     day_end: str,
     constraints: list[WeatherConstraint],
 ) -> DayRoute:
-    population = [
-        _evaluate_sequence(hotel, sequence, matrix, day_start, day_end, constraints)
-        for sequence in _candidate_sequences(hotel, cluster, matrix, day_start, constraints)
-    ]
+    population = _run_nsga2(hotel, cluster, matrix, day_start, day_end, constraints)
     if not population:
         route = DayRoute(day=day, stops=[], total_minutes=0, total_cost=0, fitness_score=0)
         return attach_route_geometry(hotel, route)
 
-    front = _pareto_front(population)
+    front = [individual.candidate for individual in population if individual.rank == 0]
     best = max(
         front,
         key=lambda candidate: (

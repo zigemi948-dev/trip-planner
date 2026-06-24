@@ -21,7 +21,7 @@ TOPOLOGY_NODES = [
     WorkflowTopologyNode(
         name="vrp_solver",
         phase="Compute",
-        description="Solve capacity-clustered TD-VRPTW day routes.",
+        description="Solve capacity-clustered TD-VRPTW day routes with NSGA-II.",
     ),
     WorkflowTopologyNode(
         name="budget_evaluator",

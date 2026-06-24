@@ -1,6 +1,5 @@
-from app.core.config import settings
 from app.graph.state import Coordinates, IntentConstraints, POICandidate
-from app.services.mcp_client import MCPToolError, call_tool
+from app.services.geo_fact_service import GeoFactUnavailableError, resolve_hotel_fact
 
 
 def resolve_hotel_anchor(intent: IntentConstraints) -> POICandidate:
@@ -9,12 +8,10 @@ def resolve_hotel_anchor(intent: IntentConstraints) -> POICandidate:
     Hotels are modeled as POI nodes with zero visit duration so they can share
     the same matrix and graph contracts as attractions.
     """
-    if settings.provider_mode.lower() == "amap":
-        try:
-            payload = call_tool("amap_hotel_anchor", {"city": intent.destination})
-            return POICandidate.model_validate(payload)
-        except (MCPToolError, ValueError, TypeError):
-            pass
+    try:
+        return resolve_hotel_fact(intent.destination)
+    except GeoFactUnavailableError:
+        pass
 
     return POICandidate(
         id="hotel_anchor",

@@ -13,7 +13,7 @@ class MCPToolError(RuntimeError):
 
 
 def call_tool(name: str, arguments: dict) -> object:
-    """Call a registered MCP tool over HTTP or the in-process JSON-RPC handler."""
+    """Call a registered MCP tool over an explicitly configured transport."""
     message = {
         "jsonrpc": "2.0",
         "id": uuid4().hex,
@@ -23,7 +23,15 @@ def call_tool(name: str, arguments: dict) -> object:
             "arguments": arguments,
         },
     }
-    response = _call_http(message) if settings.mcp_http_url else _call_in_process(message)
+    if settings.mcp_http_url:
+        response = _call_http(message)
+    elif settings.mcp_allow_inprocess:
+        response = _call_in_process(message)
+    else:
+        raise MCPToolError(
+            "External MCP endpoint is not configured. Set TRIP_MCP_HTTP_URL, "
+            "or set TRIP_MCP_ALLOW_INPROCESS=true only for local development."
+        )
     if "error" in response:
         error = response["error"]
         raise MCPToolError(str(error.get("message") or error))

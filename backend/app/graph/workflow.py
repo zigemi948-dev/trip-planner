@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Callable
 
+from langgraph.graph import END, START, StateGraph
+
 from app.graph.edges import budget_retry_exhausted, should_retry_budget
 from app.graph.nodes import (
     budget_evaluator_node,
@@ -42,6 +44,7 @@ BUDGET_REPAIR_NODE = WorkflowNode("budget_repair", "Compute", budget_repair_node
 MATRIX_NODE = WorkflowNode("matrix_builder", "Compute", matrix_builder_node)
 SOLVER_NODE = WorkflowNode("vrp_solver", "Compute", vrp_solver_node)
 BUDGET_NODE = WorkflowNode("budget_evaluator", "Compute", budget_evaluator_node)
+LANGGRAPH_WORKFLOW = None
 
 
 def run_trip_workflow(intent: IntentConstraints) -> TripState:
@@ -53,14 +56,69 @@ def run_trip_workflow(intent: IntentConstraints) -> TripState:
 
 
 def iter_trip_workflow(intent: IntentConstraints):
-    """Yield workflow state after each major node for streaming clients."""
-    state = TripState(intent_constraints=intent)
-    for node in MAIN_COMPUTE_NODES:
-        state = _run_node(state, node)
-        yield node.name, state
+    """Yield LangGraph runtime state after each major node for streaming clients."""
+    initial_state = TripState(intent_constraints=intent)
+    for update in get_langgraph_workflow().stream(initial_state, stream_mode="updates"):
+        for node_name, payload in update.items():
+            yield node_name, _coerce_trip_state(payload)
+    return None
 
-    while should_retry_budget(state) and not budget_retry_exhausted(state):
-        before_count = len(state.spatial_graph_data.poi_candidates)
+
+def get_langgraph_workflow():
+    """Return the compiled LangGraph runtime graph."""
+    global LANGGRAPH_WORKFLOW
+    if LANGGRAPH_WORKFLOW is None:
+        LANGGRAPH_WORKFLOW = build_langgraph_workflow()
+    return LANGGRAPH_WORKFLOW
+
+
+def build_langgraph_workflow():
+    """Compile the Map-Compute-Reduce topology with LangGraph StateGraph."""
+    graph = StateGraph(TripState)
+    for node in MAIN_COMPUTE_NODES:
+        if node.name == BUDGET_NODE.name:
+            graph.add_node(node.name, _langgraph_budget_node)
+        else:
+            graph.add_node(node.name, _node_action(node))
+    graph.add_node(BUDGET_REPAIR_NODE.name, _langgraph_budget_repair_node)
+    for node in REDUCE_NODES:
+        graph.add_node(node.name, _node_action(node))
+
+    graph.add_edge(START, "map_agents")
+    graph.add_edge("map_agents", "matrix_builder")
+    graph.add_edge("matrix_builder", "vrp_solver")
+    graph.add_edge("vrp_solver", "budget_evaluator")
+    graph.add_conditional_edges(
+        "budget_evaluator",
+        _route_after_budget,
+        {
+            "repair": "budget_repair",
+            "reduce": "context_compressor",
+        },
+    )
+    graph.add_conditional_edges(
+        "budget_repair",
+        _route_after_budget_repair,
+        {
+            "retry": "matrix_builder",
+            "reduce": "context_compressor",
+        },
+    )
+    graph.add_edge("context_compressor", "planner_reduce")
+    graph.add_edge("planner_reduce", END)
+    return graph.compile()
+
+
+def _node_action(node: WorkflowNode) -> Callable[[TripState], TripState]:
+    def action(state: TripState) -> TripState:
+        return _run_node(_coerce_trip_state(state), node)
+
+    return action
+
+
+def _langgraph_budget_node(state: TripState) -> TripState:
+    state = _run_node(_coerce_trip_state(state), BUDGET_NODE)
+    if should_retry_budget(state) and not budget_retry_exhausted(state):
         state.emit(
             "edge_taken",
             {
@@ -69,37 +127,56 @@ def iter_trip_workflow(intent: IntentConstraints):
                 "condition": "budget_breakdown.remaining < 0",
             },
         )
-        state = _run_node(state, BUDGET_REPAIR_NODE)
-        yield BUDGET_REPAIR_NODE.name, state
-        if len(state.spatial_graph_data.poi_candidates) == before_count:
-            state.emit("edge_blocked", {"source": "budget_repair", "reason": "no candidate pruned"})
-            break
-        state.graph_controls.repair_attempts += 1
+    else:
         state.emit(
             "edge_taken",
             {
-                "source": "budget_repair",
-                "target": "matrix_builder",
-                "condition": "candidate_pruned",
-                "repair_attempt": state.graph_controls.repair_attempts,
+                "source": "budget_evaluator",
+                "target": "context_compressor",
+                "condition": "budget_breakdown.remaining >= 0 or repair_exhausted",
             },
         )
-        for node in (MATRIX_NODE, SOLVER_NODE, BUDGET_NODE):
-            state = _run_node(state, node)
-            yield node.name, state
+    return state
 
+
+def _langgraph_budget_repair_node(state: TripState) -> TripState:
+    state = _coerce_trip_state(state)
+    before_count = len(state.spatial_graph_data.poi_candidates)
+    state = _run_node(state, BUDGET_REPAIR_NODE)
+    if len(state.spatial_graph_data.poi_candidates) == before_count:
+        state.emit("edge_blocked", {"source": "budget_repair", "reason": "no candidate pruned"})
+        return state
+    state.graph_controls.repair_attempts += 1
     state.emit(
         "edge_taken",
         {
-            "source": "budget_evaluator",
-            "target": "context_compressor",
-            "condition": "budget_breakdown.remaining >= 0 or repair_exhausted",
+            "source": "budget_repair",
+            "target": "matrix_builder",
+            "condition": "candidate_pruned",
+            "repair_attempt": state.graph_controls.repair_attempts,
         },
     )
-    for node in REDUCE_NODES:
-        state = _run_node(state, node)
-        yield node.name, state
     return state
+
+
+def _route_after_budget(state: TripState) -> str:
+    state = _coerce_trip_state(state)
+    if should_retry_budget(state) and not budget_retry_exhausted(state):
+        return "repair"
+    return "reduce"
+
+
+def _route_after_budget_repair(state: TripState) -> str:
+    state = _coerce_trip_state(state)
+    if state.graph_controls.current_status == GraphStatus.budget_repaired:
+        return "retry"
+    return "reduce"
+
+
+def _coerce_trip_state(value) -> TripState:
+    if isinstance(value, TripState):
+        return value
+    return TripState.model_validate(value)
 
 
 def _run_node(state: TripState, node: WorkflowNode) -> TripState:

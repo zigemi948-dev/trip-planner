@@ -88,52 +88,16 @@ button:disabled {
   border: 1px solid #d9e0ea;
   border-radius: 8px;
   overflow: hidden;
-  background:
-    linear-gradient(90deg, rgba(29, 78, 216, 0.07) 1px, transparent 1px),
-    linear-gradient(rgba(29, 78, 216, 0.07) 1px, transparent 1px),
-    #eef4fb;
-  background-size: 42px 42px;
+  background: #eef4fb;
 }
 
-.route-map {
-  display: block;
+.mapbox-canvas {
   width: 100%;
   height: 360px;
 }
 
-.grid-lines line {
-  stroke: rgba(29, 78, 216, 0.08);
-  stroke-width: 1;
-}
-
-.route-path {
-  fill: none;
-  stroke: #1d4ed8;
-  stroke-width: 5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.86;
-}
-
-.route-path-2 {
-  stroke: #0f766e;
-}
-
-.route-path-3 {
-  stroke: #b45309;
-}
-
-.stop-marker circle {
-  fill: #ffffff;
-  stroke: #172033;
-  stroke-width: 2;
-}
-
-.stop-marker text {
-  text-anchor: middle;
-  fill: #172033;
-  font-size: 12px;
-  font-weight: 800;
+.mapboxgl-map {
+  font: inherit;
 }
 
 .map-legend {
@@ -163,12 +127,59 @@ button:disabled {
   background: #1d4ed8;
 }
 
-.route-color-2 {
-  background: #0f766e;
+.mapbox-stop-marker {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  color: #ffffff;
+  background: var(--marker-color, #1d4ed8);
+  box-shadow: 0 3px 12px rgba(23, 32, 51, 0.28);
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
 }
 
-.route-color-3 {
-  background: #b45309;
+.mapboxgl-popup-content {
+  display: grid;
+  gap: 4px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #172033;
+  box-shadow: 0 10px 24px rgba(23, 32, 51, 0.16);
+}
+
+.mapboxgl-popup-content strong,
+.mapboxgl-popup-content span {
+  display: block;
+}
+
+.mapboxgl-popup-content span {
+  color: #526174;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.map-empty,
+.map-error {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  z-index: 2;
+  border: 1px solid #d9e0ea;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #526174;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.map-error {
+  color: #b42318;
+  background: #fee4e2;
 }
 
 .day-chip,

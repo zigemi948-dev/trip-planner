@@ -50,6 +50,11 @@ class Settings(BaseModel):
     llm_timeout_seconds: int = 20
     mcp_http_url: str = ""
     mcp_timeout_seconds: int = 20
+    mcp_allow_inprocess: bool = False
+    amap_mcp_poi_tool: str = "amap_poi_search"
+    amap_mcp_hotel_tool: str = "amap_hotel_anchor"
+    amap_mcp_weather_tool: str = "amap_weather_constraints"
+    amap_mcp_matrix_tool: str = "amap_distance_matrix"
     matrix_cache_ttl_seconds: int = 3600
     job_store_path: str = "data/jobs.jsonl"
 
@@ -96,6 +101,11 @@ settings = Settings(
     llm_timeout_seconds=int(os.getenv("TRIP_LLM_TIMEOUT_SECONDS", "20")),
     mcp_http_url=os.getenv("TRIP_MCP_HTTP_URL", ""),
     mcp_timeout_seconds=int(os.getenv("TRIP_MCP_TIMEOUT_SECONDS", "20")),
+    mcp_allow_inprocess=_bool_env("TRIP_MCP_ALLOW_INPROCESS", False),
+    amap_mcp_poi_tool=os.getenv("TRIP_AMAP_MCP_POI_TOOL", "amap_poi_search"),
+    amap_mcp_hotel_tool=os.getenv("TRIP_AMAP_MCP_HOTEL_TOOL", "amap_hotel_anchor"),
+    amap_mcp_weather_tool=os.getenv("TRIP_AMAP_MCP_WEATHER_TOOL", "amap_weather_constraints"),
+    amap_mcp_matrix_tool=os.getenv("TRIP_AMAP_MCP_MATRIX_TOOL", "amap_distance_matrix"),
     matrix_cache_ttl_seconds=int(os.getenv("TRIP_MATRIX_CACHE_TTL_SECONDS", "3600")),
     job_store_path=os.getenv("TRIP_JOB_STORE_PATH", "data/jobs.jsonl"),
 )

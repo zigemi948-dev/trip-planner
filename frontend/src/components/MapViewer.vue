@@ -1,118 +1,301 @@
 <script setup lang="ts">
-import type { Coordinates, DayRoute } from '../types/trip';
+import mapboxgl, { type GeoJSONSource, type LngLatBoundsLike, type Map, type Marker, type Style } from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import type { Coordinates, DayRoute, RouteStop } from '../types/trip';
 
 const props = defineProps<{
   routes: DayRoute[];
 }>();
 
-const width = 960;
-const height = 360;
-const padding = 34;
-const verticalGridLines = Array.from({ length: 7 }, (_, index) => (index + 1) * 120);
-const horizontalGridLines = Array.from({ length: 3 }, (_, index) => (index + 1) * 90);
+const mapContainer = ref<HTMLDivElement | null>(null);
+const mapError = ref('');
+const mapReady = ref(false);
+let map: Map | null = null;
+let markers: Marker[] = [];
 
-interface MapBounds {
-  minLat: number;
-  maxLat: number;
-  minLng: number;
-  maxLng: number;
+const routeColors = ['#1d4ed8', '#0f766e', '#b45309', '#7c3aed', '#be123c', '#0369a1'];
+const routeCollection = computed<GeoJSON.FeatureCollection>(() => ({
+  type: 'FeatureCollection',
+  features: props.routes
+    .filter((route) => routeCoordinates(route).length >= 2)
+    .map((route, index) => ({
+      type: 'Feature',
+      properties: {
+        day: route.day,
+        color: routeColors[index % routeColors.length]
+      },
+      geometry: {
+        type: 'LineString',
+        coordinates: routeCoordinates(route).map(toLngLat)
+      }
+    }))
+}));
+
+const stopCollection = computed<GeoJSON.FeatureCollection>(() => ({
+  type: 'FeatureCollection',
+  features: props.routes.flatMap((route, routeIndex) =>
+    route.stops.map((stop, stopIndex) => ({
+      type: 'Feature',
+      properties: {
+        day: route.day,
+        stopIndex: stopIndex + 1,
+        title: stop.poi.name,
+        subtitle: `${stop.arrival_time}-${stop.departure_time}`,
+        color: routeColors[routeIndex % routeColors.length]
+      },
+      geometry: {
+        type: 'Point',
+        coordinates: toLngLat(stop.poi.coordinates)
+      }
+    }))
+  )
+}));
+
+onMounted(async () => {
+  await nextTick();
+  initializeMap();
+});
+
+onBeforeUnmount(() => {
+  clearMarkers();
+  map?.remove();
+  map = null;
+});
+
+watch(
+  () => props.routes,
+  () => {
+    if (!map || !mapReady.value) {
+      return;
+    }
+    renderRoutes();
+  },
+  { deep: true }
+);
+
+function initializeMap() {
+  if (!mapContainer.value || map) {
+    return;
+  }
+
+  const token = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
+  if (token) {
+    mapboxgl.accessToken = token;
+  }
+
+  try {
+    map = new mapboxgl.Map({
+      container: mapContainer.value,
+      style: token ? 'mapbox://styles/mapbox/streets-v12' : osmRasterStyle(),
+      center: defaultCenter(),
+      zoom: 12,
+      attributionControl: true
+    });
+    map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right');
+    map.addControl(new mapboxgl.ScaleControl({ unit: 'metric' }), 'bottom-left');
+    map.on('load', () => {
+      mapReady.value = true;
+      addRouteLayers();
+      renderRoutes();
+    });
+    map.on('error', (event) => {
+      mapError.value = event.error?.message ?? 'Map failed to load.';
+    });
+  } catch (error) {
+    mapError.value = error instanceof Error ? error.message : 'Map initialization failed.';
+  }
 }
 
-interface ProjectedPoint {
-  x: number;
-  y: number;
+function addRouteLayers() {
+  if (!map) {
+    return;
+  }
+  if (!map.getSource('trip-routes')) {
+    map.addSource('trip-routes', {
+      type: 'geojson',
+      data: routeCollection.value
+    });
+  }
+  if (!map.getSource('trip-stops')) {
+    map.addSource('trip-stops', {
+      type: 'geojson',
+      data: stopCollection.value
+    });
+  }
+  if (!map.getLayer('trip-route-lines')) {
+    map.addLayer({
+      id: 'trip-route-lines',
+      type: 'line',
+      source: 'trip-routes',
+      layout: {
+        'line-cap': 'round',
+        'line-join': 'round'
+      },
+      paint: {
+        'line-color': ['get', 'color'],
+        'line-width': 5,
+        'line-opacity': 0.9
+      }
+    });
+  }
+  if (!map.getLayer('trip-route-halo')) {
+    map.addLayer(
+      {
+        id: 'trip-route-halo',
+        type: 'line',
+        source: 'trip-routes',
+        layout: {
+          'line-cap': 'round',
+          'line-join': 'round'
+        },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': 9,
+          'line-opacity': 0.72
+        }
+      },
+      'trip-route-lines'
+    );
+  }
 }
 
-type RouteStop = DayRoute['stops'][number];
+function renderRoutes() {
+  if (!map) {
+    return;
+  }
+  (map.getSource('trip-routes') as GeoJSONSource | undefined)?.setData(routeCollection.value);
+  (map.getSource('trip-stops') as GeoJSONSource | undefined)?.setData(stopCollection.value);
+  renderMarkers();
+  fitToRoutes();
+}
 
-function getAllPoints(): Coordinates[] {
-  return props.routes.flatMap((route: DayRoute) => [
-    ...route.geometry,
-    ...route.stops.map((stop: RouteStop) => stop.poi.coordinates)
+function renderMarkers() {
+  if (!map) {
+    return;
+  }
+  const currentMap = map;
+  clearMarkers();
+  props.routes.forEach((route, routeIndex) => {
+    route.stops.forEach((stop, stopIndex) => {
+      const markerNode = document.createElement('button');
+      markerNode.type = 'button';
+      markerNode.className = 'mapbox-stop-marker';
+      markerNode.style.setProperty('--marker-color', routeColors[routeIndex % routeColors.length]);
+      markerNode.textContent = String(stopIndex + 1);
+      const popup = new mapboxgl.Popup({ offset: 20 }).setHTML(popupHtml(route, stop, stopIndex));
+      const marker = new mapboxgl.Marker({ element: markerNode, anchor: 'center' })
+        .setLngLat(toLngLat(stop.poi.coordinates))
+        .setPopup(popup)
+        .addTo(currentMap);
+      markers.push(marker);
+    });
+  });
+}
+
+function fitToRoutes() {
+  if (!map) {
+    return;
+  }
+  const coordinates = allCoordinates();
+  if (!coordinates.length) {
+    map.easeTo({ center: defaultCenter(), zoom: 12, duration: 500 });
+    return;
+  }
+
+  const bounds = new mapboxgl.LngLatBounds(toLngLat(coordinates[0]), toLngLat(coordinates[0]));
+  coordinates.forEach((coordinate) => bounds.extend(toLngLat(coordinate)));
+  map.fitBounds(bounds as LngLatBoundsLike, {
+    padding: { top: 44, right: 44, bottom: 58, left: 44 },
+    maxZoom: 15,
+    duration: 700
+  });
+}
+
+function clearMarkers() {
+  markers.forEach((marker) => marker.remove());
+  markers = [];
+}
+
+function routeCoordinates(route: DayRoute): Coordinates[] {
+  if (route.geometry.length >= 2) {
+    return route.geometry;
+  }
+  return route.stops.map((stop) => stop.poi.coordinates);
+}
+
+function allCoordinates(): Coordinates[] {
+  return props.routes.flatMap((route) => [
+    ...routeCoordinates(route),
+    ...route.stops.map((stop) => stop.poi.coordinates)
   ]);
 }
 
-function getBounds(): MapBounds | null {
-  const points = getAllPoints();
-  if (points.length === 0) {
-    return null;
+function defaultCenter(): [number, number] {
+  const coordinates = allCoordinates();
+  if (!coordinates.length) {
+    return [121.4737, 31.2304];
   }
+  const lng = coordinates.reduce((sum, coordinate) => sum + coordinate.lng, 0) / coordinates.length;
+  const lat = coordinates.reduce((sum, coordinate) => sum + coordinate.lat, 0) / coordinates.length;
+  return [lng, lat];
+}
 
+function toLngLat(coordinate: Coordinates): [number, number] {
+  return [coordinate.lng, coordinate.lat];
+}
+
+function popupHtml(route: DayRoute, stop: RouteStop, stopIndex: number): string {
+  return `
+    <strong>D${route.day}.${stopIndex + 1} ${escapeHtml(stop.poi.name)}</strong>
+    <span>${escapeHtml(stop.arrival_time)}-${escapeHtml(stop.departure_time)}</span>
+    <span>${escapeHtml(stop.inbound_mode ?? 'Start')} 路 ¥${stop.inbound_cost.toFixed(2)}</span>
+  `;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function osmRasterStyle(): Style {
   return {
-    minLat: Math.min(...points.map((point: Coordinates) => point.lat)),
-    maxLat: Math.max(...points.map((point: Coordinates) => point.lat)),
-    minLng: Math.min(...points.map((point: Coordinates) => point.lng)),
-    maxLng: Math.max(...points.map((point: Coordinates) => point.lng))
+    version: 8,
+    sources: {
+      osm: {
+        type: 'raster' as const,
+        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        attribution: '© OpenStreetMap contributors'
+      }
+    },
+    layers: [
+      {
+        id: 'osm',
+        type: 'raster' as const,
+        source: 'osm'
+      }
+    ]
   };
-}
-
-function project(point: Coordinates): ProjectedPoint {
-  const box = getBounds();
-  if (!box) {
-    return { x: width / 2, y: height / 2 };
-  }
-
-  const lngSpan = Math.max(box.maxLng - box.minLng, 0.0001);
-  const latSpan = Math.max(box.maxLat - box.minLat, 0.0001);
-  const x = padding + ((point.lng - box.minLng) / lngSpan) * (width - padding * 2);
-  const y = height - padding - ((point.lat - box.minLat) / latSpan) * (height - padding * 2);
-  return { x, y };
-}
-
-function routePath(route: DayRoute): string {
-  const points = route.geometry.length
-    ? route.geometry
-    : route.stops.map((stop: RouteStop) => stop.poi.coordinates);
-  return points
-    .map((point: Coordinates, index: number) => {
-      const projected = project(point);
-      return `${index === 0 ? 'M' : 'L'} ${projected.x.toFixed(1)} ${projected.y.toFixed(1)}`;
-    })
-    .join(' ');
-}
-
-function stopPosition(stop: RouteStop): ProjectedPoint {
-  return project(stop.poi.coordinates);
-}
-
-function stopLabel(index: number | string): number {
-  return Number(index) + 1;
 }
 </script>
 
 <template>
   <section class="map-shell" aria-label="Route map">
-    <svg
-      class="route-map"
-      :viewBox="`0 0 ${width} ${height}`"
-      role="img"
-      aria-label="Projected route geometry"
-      >
-      <g class="grid-lines">
-        <line v-for="x in verticalGridLines" :key="`x-${x}`" :x1="x" y1="0" :x2="x" :y2="height" />
-        <line v-for="y in horizontalGridLines" :key="`y-${y}`" x1="0" :y1="y" :x2="width" :y2="y" />
-      </g>
-      <g v-for="route in routes" :key="route.day" class="route-layer">
-        <path
-          class="route-path"
-          :class="`route-path-${route.day}`"
-          :d="routePath(route)"
-        />
-        <g
-          v-for="(stop, index) in route.stops"
-          :key="stop.poi.id"
-          class="stop-marker"
-          :transform="`translate(${stopPosition(stop).x}, ${stopPosition(stop).y})`"
-        >
-          <circle r="12" />
-          <text y="4">{{ stopLabel(index) }}</text>
-          <title>D{{ route.day }} {{ stop.arrival_time }} {{ stop.poi.name }}</title>
-        </g>
-      </g>
-    </svg>
+    <div ref="mapContainer" class="mapbox-canvas" />
+    <div v-if="!routes.length" class="map-empty">
+      Build a trip to render the route on the map.
+    </div>
+    <div v-if="mapError" class="map-error">
+      {{ mapError }}
+    </div>
     <div class="map-legend">
-      <span v-for="route in routes" :key="route.day">
-        <i :class="`legend-color route-color-${route.day}`"></i>
+      <span v-for="(route, index) in routes" :key="route.day">
+        <i class="legend-color" :style="{ background: routeColors[index % routeColors.length] }"></i>
         Day {{ route.day }}
       </span>
     </div>

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.graph.state import IntegrationProbeResponse, IntegrationProbeResult
-from app.services.amap_service import AmapUnavailableError, amap_is_enabled, search_pois
+from app.services.geo_fact_service import GeoFactUnavailableError, amap_mcp_enabled, search_poi_facts
 from app.services.llm_service import LLMUnavailableError, complete_text, llm_is_enabled
 
 
@@ -16,16 +16,16 @@ def probe_integrations() -> IntegrationProbeResponse:
 
 
 def _probe_amap() -> IntegrationProbeResult:
-    if not amap_is_enabled():
+    if not amap_mcp_enabled():
         return IntegrationProbeResult(
             name="amap",
             status="skipped",
             enabled=False,
-            message="Amap provider is not enabled.",
+            message="Amap MCP provider is not enabled.",
         )
     try:
-        pois = search_pois("Shanghai", ["museum"], limit=1)
-    except AmapUnavailableError as exc:
+        pois = search_poi_facts("Shanghai", ["museum"], limit=1)
+    except GeoFactUnavailableError as exc:
         return IntegrationProbeResult(
             name="amap",
             status="error",

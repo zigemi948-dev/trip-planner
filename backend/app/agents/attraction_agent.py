@@ -1,6 +1,5 @@
-from app.core.config import settings
 from app.graph.state import Coordinates, IntentConstraints, POICandidate
-from app.services.mcp_client import MCPToolError, call_tool
+from app.services.geo_fact_service import GeoFactUnavailableError, search_poi_facts
 
 
 DEMO_POIS = [
@@ -18,19 +17,14 @@ def search_attractions(intent: IntentConstraints) -> list[POICandidate]:
     Amap mode uses the MCP tool boundary. The deterministic demo source remains
     the local fallback when the remote provider is unavailable.
     """
-    if settings.provider_mode.lower() == "amap":
-        try:
-            payload = call_tool(
-                "amap_poi_search",
-                {
-                    "city": intent.destination,
-                    "keywords": intent.preferences or ["attraction"],
-                    "limit": 10,
-                },
-            )
-            return [POICandidate.model_validate(item) for item in payload or []]
-        except (MCPToolError, ValueError, TypeError):
-            pass
+    try:
+        return search_poi_facts(
+            city=intent.destination,
+            keywords=intent.preferences or ["attraction"],
+            limit=10,
+        )
+    except GeoFactUnavailableError:
+        pass
 
     return [
         POICandidate(

@@ -5,9 +5,8 @@ from hashlib import sha1
 from app.algorithms.matrix_builder import build_fallback_matrix
 from app.core.config import settings
 from app.graph.state import FinancialContext, MatrixEdge, POICandidate
-from app.services.amap_service import AmapUnavailableError, build_amap_matrix
 from app.services.cache_service import MemoryCache
-from app.services.mcp_client import MCPToolError, call_tool
+from app.services.geo_fact_service import GeoFactUnavailableError, build_time_dependent_matrix_facts
 
 
 MatrixBuild = tuple[dict[str, MatrixEdge], str]
@@ -57,25 +56,11 @@ def build_time_dependent_matrix_with_source(
 
     if settings.provider_mode.lower() == "amap":
         try:
-            payload = call_tool(
-                "amap_distance_matrix",
-                {
-                    "nodes": [node.model_dump(mode="json") for node in nodes],
-                    "financial": financial.model_dump(mode="json"),
-                },
-            )
-            matrix = {
-                key: MatrixEdge.model_validate(value)
-                for key, value in (payload or {}).items()
-            }
+            matrix = build_time_dependent_matrix_facts(nodes, financial)
             source = "amap:mcp"
-        except (MCPToolError, ValueError, TypeError):
-            try:
-                matrix = build_amap_matrix(nodes, financial)
-                source = "amap"
-            except AmapUnavailableError:
-                matrix = build_fallback_matrix(nodes, financial)
-                source = "fallback"
+        except GeoFactUnavailableError:
+            matrix = build_fallback_matrix(nodes, financial)
+            source = "fallback"
     else:
         matrix = build_fallback_matrix(nodes, financial)
         source = "fallback"

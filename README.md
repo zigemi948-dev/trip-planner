@@ -73,3 +73,42 @@ npm run dev
 - `backend/data/`: JSONL 任务存储。
 - `backend/exports/`: 导出的 HTML 文件。
 - `backend/.test-exports/` 和 `backend/.test-jobs/`: 测试临时输出。
+## Amap MCP Runtime
+
+Production Amap mode now requires a real external MCP endpoint. The backend no
+longer silently falls back to its in-process demo MCP server when
+`TRIP_PROVIDER_MODE=amap`.
+
+```powershell
+$env:TRIP_PROVIDER_MODE="amap"
+$env:TRIP_MCP_HTTP_URL="https://your-amap-mcp-host.example/mcp"
+$env:TRIP_MCP_TIMEOUT_SECONDS="20"
+# Optional: map this project to the real Amap MCP server's tool names.
+$env:TRIP_AMAP_MCP_POI_TOOL="amap_poi_search"
+$env:TRIP_AMAP_MCP_HOTEL_TOOL="amap_hotel_anchor"
+$env:TRIP_AMAP_MCP_WEATHER_TOOL="amap_weather_constraints"
+$env:TRIP_AMAP_MCP_MATRIX_TOOL="amap_distance_matrix"
+```
+
+The project-local MCP server remains available only for development:
+
+```powershell
+$env:TRIP_MCP_ALLOW_INPROCESS="true"
+python backend\scripts\run_mcp_server.py
+```
+
+Use the in-process server only for local testing. Real POI, hotel, weather, and
+distance-matrix facts should come through `TRIP_MCP_HTTP_URL`.
+
+## Mapbox GL Frontend
+
+The frontend route map uses Mapbox GL. Set a Mapbox token when you want Mapbox
+hosted styles:
+
+```powershell
+$env:VITE_MAPBOX_TOKEN="your-mapbox-token"
+npm run dev
+```
+
+When `VITE_MAPBOX_TOKEN` is not set, the map falls back to OpenStreetMap raster
+tiles so local development still shows a real basemap.

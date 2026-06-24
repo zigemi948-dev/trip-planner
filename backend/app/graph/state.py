@@ -82,6 +82,8 @@ class RuntimeCapabilities(BaseModel):
     provider_mode: str
     amap_configured: bool
     amap_enabled: bool
+    amap_mcp_configured: bool = False
+    mcp_inprocess_allowed: bool = False
     llm_configured: bool
     llm_enabled: bool
     llm_model: str
@@ -122,6 +124,7 @@ class WorkflowTopologyEdge(BaseModel):
 class WorkflowTopology(BaseModel):
     """Map-Compute-Reduce graph shape for UI and diagnostics."""
 
+    runtime: str = "langgraph"
     nodes: list[WorkflowTopologyNode] = Field(default_factory=list)
     edges: list[WorkflowTopologyEdge] = Field(default_factory=list)
 
