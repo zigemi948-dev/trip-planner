@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urlsplit, urlunsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -48,13 +49,14 @@ def _call_in_process(message: dict) -> dict:
 
 
 def _call_http(message: dict) -> dict:
-    url = settings.mcp_http_url.rstrip("/")
-    if not url.endswith("/mcp"):
-        url = f"{url}/mcp"
+    url = _mcp_endpoint_url(settings.mcp_http_url)
     request = Request(
         url,
         data=json.dumps(message).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
         method="POST",
     )
     try:
@@ -66,6 +68,15 @@ def _call_http(message: dict) -> dict:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise MCPToolError("MCP response was not valid JSON") from exc
+
+
+def _mcp_endpoint_url(raw_url: str) -> str:
+    """Append /mcp without corrupting query-string API keys."""
+    parts = urlsplit(raw_url.strip())
+    path = parts.path.rstrip("/")
+    if not path.endswith("/mcp"):
+        path = f"{path}/mcp"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
 def _extract_tool_payload(result: dict) -> object:

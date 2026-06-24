@@ -20,7 +20,7 @@ from app.graph.workflow import get_langgraph_workflow, run_replan_workflow, run_
 from app.services.export_service import persist_export_payload, render_export_payload
 from app.services.job_service import JobStore
 from app.services.matrix_service import build_time_dependent_matrix_with_source, matrix_cache
-from app.services.mcp_client import MCPToolError, call_tool
+from app.services.mcp_client import MCPToolError, _mcp_endpoint_url, call_tool
 
 TEST_OUTPUT_DIR = BACKEND_ROOT / "test-output"
 
@@ -244,6 +244,11 @@ def test_mcp_client_requires_external_endpoint_unless_dev_inprocess_enabled(monk
         call_tool("finance_context", {})
 
 
+def test_mcp_endpoint_url_preserves_query_string_api_keys():
+    assert _mcp_endpoint_url("https://mcp.amap.com/mcp?key=secret") == "https://mcp.amap.com/mcp?key=secret"
+    assert _mcp_endpoint_url("https://mcp.example.com/base?key=secret") == "https://mcp.example.com/base/mcp?key=secret"
+
+
 def test_amap_agents_read_geo_facts_through_mcp_layer(monkeypatch: pytest.MonkeyPatch):
     calls: list[tuple[str, dict]] = []
 
@@ -301,6 +306,57 @@ def test_amap_agents_read_geo_facts_through_mcp_layer(monkeypatch: pytest.Monkey
     assert constraints[0].reason == "amap_heat:test"
     assert [name for name, _ in calls] == ["amap_poi_search", "amap_hotel_anchor", "amap_weather_constraints"]
     assert all(arguments["city"] == "上海" for _, arguments in calls)
+
+
+def test_amap_geo_facts_can_read_official_mcp_text_search(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_tool(name: str, arguments: dict):
+        calls.append((name, arguments))
+        if name == "amap_poi_search":
+            return []
+        if name == "maps_geo":
+            return {
+                "results": [
+                    {
+                        "adcode": "310000",
+                        "city": "上海市",
+                        "location": "121.473667,31.230525",
+                    }
+                ]
+            }
+        if name == "maps_text_search":
+            return {
+                "pois": [
+                    {
+                        "id": "B0FFI2885X",
+                        "name": "上海市历史博物馆",
+                        "typecode": "140100",
+                    }
+                ]
+            }
+        if name == "maps_search_detail":
+            return {
+                "id": "B0FFI2885X",
+                "name": "上海市历史博物馆",
+                "location": "121.470891,31.230594",
+                "type": "科教文化服务;博物馆;博物馆",
+                "rating": "4.7",
+            }
+        raise MCPToolError(f"unexpected tool {name}")
+
+    monkeypatch.setattr("app.services.geo_fact_service.call_tool", fake_tool)
+    monkeypatch.setattr("app.services.geo_fact_service.settings.provider_mode", "amap")
+    monkeypatch.setattr("app.services.geo_fact_service.settings.mcp_http_url", "https://mcp.amap.com/mcp?key=secret")
+
+    pois = provider_adapters.AmapAttractionProvider().search(
+        IntentConstraints(user_query="demo", destination="Shanghai", preferences=["museum"])
+    )
+
+    assert pois[0].id == "amap_B0FFI2885X"
+    assert pois[0].category == "museum"
+    assert pois[0].coordinates.lng == 121.470891
+    assert ("maps_text_search", {"keywords": "museum", "city": "310000", "citylimit": True}) in calls
 
 
 def test_matrix_builder_reads_road_tensor_through_geo_fact_layer(monkeypatch: pytest.MonkeyPatch):

@@ -91,12 +91,12 @@ button:disabled {
   background: #eef4fb;
 }
 
-.mapbox-canvas {
+.amap-canvas {
   width: 100%;
   height: 360px;
 }
 
-.mapboxgl-map {
+.amap-container {
   font: inherit;
 }
 
@@ -127,7 +127,7 @@ button:disabled {
   background: #1d4ed8;
 }
 
-.mapbox-stop-marker {
+.amap-stop-marker {
   display: grid;
   place-items: center;
   width: 28px;
@@ -142,21 +142,25 @@ button:disabled {
   cursor: pointer;
 }
 
-.mapboxgl-popup-content {
-  display: grid;
-  gap: 4px;
+.amap-info-content {
   border-radius: 8px;
-  padding: 10px 12px;
-  color: #172033;
+  padding: 0;
   box-shadow: 0 10px 24px rgba(23, 32, 51, 0.16);
 }
 
-.mapboxgl-popup-content strong,
-.mapboxgl-popup-content span {
+.amap-popup-content {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  color: #172033;
+}
+
+.amap-popup-content strong,
+.amap-popup-content span {
   display: block;
 }
 
-.mapboxgl-popup-content span {
+.amap-popup-content span {
   color: #526174;
   font-size: 12px;
   font-weight: 700;

@@ -14,14 +14,5 @@ export default defineConfig({
         ws: true
       }
     }
-  },
-  // Skip source map processing for mapbox-gl to avoid esbuild parsing failures
-  // with the large mapbox-gl.js.map file (6.5 MB).
-  build: {
-    rollupOptions: {
-      onLog(level, log) {
-        if (log.code === 'SOURCEMAP_ERROR') return;
-      }
-    }
   }
 });

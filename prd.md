@@ -100,7 +100,7 @@ $$C_{total} = \sum C_{fixed} + \sum (\mathcal{D}_{i,j} \times \text{Rate}_{mode}
 
 #### 3. GIS 渲染与 Headless 导出
 
-* **GIS 抽稀：** 前端 Mapbox GL 针对后端返回的稠密路网坐标串，执行**道格拉斯-普克（Douglas-Peucker）算法**降维，保证 WebGL 渲染帧率稳定。
+* **GIS 抽稀：** 前端高德地图针对后端返回的稠密路网坐标串，执行**道格拉斯-普克（Douglas-Peucker）算法**降维，保证路线渲染帧率稳定。
 * **无头导出：** 后端集成 Puppeteer + Celery 异步队列，在高分辨率 Headless 浏览器环境内，将 DOM 树、ECharts 实例与底图静态化为 PDF 或图片流。
 
 ---

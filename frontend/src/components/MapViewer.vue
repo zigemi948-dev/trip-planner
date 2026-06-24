@@ -1,8 +1,81 @@
 <script setup lang="ts">
-import mapboxgl, { type GeoJSONSource, type LngLatBoundsLike, type Map, type Marker, type Style } from 'mapbox-gl';
-import 'mapbox-gl/dist/mapbox-gl.css';
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { Coordinates, DayRoute, RouteStop } from '../types/trip';
+
+type AMapLngLat = [number, number];
+
+type AMapOverlay = {
+  setMap(map: AMapMap | null): void;
+};
+
+type AMapEvented = {
+  on(eventName: string, handler: () => void): void;
+};
+
+type AMapMap = AMapEvented & {
+  destroy(): void;
+  addControl(control: unknown): void;
+  setZoomAndCenter(zoom: number, center: AMapLngLat): void;
+  setFitView(
+    overlays: AMapOverlay[],
+    immediately?: boolean,
+    avoid?: [number, number, number, number],
+    maxZoom?: number
+  ): void;
+};
+
+type AMapMarker = AMapOverlay & AMapEvented;
+type AMapPolyline = AMapOverlay;
+
+type AMapInfoWindow = {
+  close(): void;
+  open(map: AMapMap, position: AMapLngLat): void;
+  setContent(content: string): void;
+};
+
+type AMapNamespace = {
+  Map: new (
+    container: HTMLDivElement,
+    options: {
+      center: AMapLngLat;
+      mapStyle?: string;
+      resizeEnable?: boolean;
+      viewMode?: '2D' | '3D';
+      zoom: number;
+    }
+  ) => AMapMap;
+  Marker: new (options: {
+    anchor?: string;
+    content: HTMLElement;
+    offset?: unknown;
+    position: AMapLngLat;
+    zIndex?: number;
+  }) => AMapMarker;
+  Pixel: new (x: number, y: number) => unknown;
+  Polyline: new (options: {
+    lineCap?: 'butt' | 'round' | 'square';
+    lineJoin?: 'miter' | 'round' | 'bevel';
+    path: AMapLngLat[];
+    showDir?: boolean;
+    strokeColor: string;
+    strokeOpacity?: number;
+    strokeWeight?: number;
+    zIndex?: number;
+  }) => AMapPolyline;
+  InfoWindow: new (options: { autoMove?: boolean; offset?: unknown }) => AMapInfoWindow;
+  Scale?: new () => unknown;
+  ToolBar?: new (options?: Record<string, unknown>) => unknown;
+  plugin(names: string[], callback: () => void): void;
+};
+
+declare global {
+  interface Window {
+    AMap?: AMapNamespace;
+    _AMapSecurityConfig?: {
+      securityJsCode: string;
+    };
+  }
+}
 
 const props = defineProps<{
   routes: DayRoute[];
@@ -11,55 +84,24 @@ const props = defineProps<{
 const mapContainer = ref<HTMLDivElement | null>(null);
 const mapError = ref('');
 const mapReady = ref(false);
-let map: Map | null = null;
-let markers: Marker[] = [];
+let map: AMapMap | null = null;
+let infoWindow: AMapInfoWindow | null = null;
+let markers: AMapMarker[] = [];
+let routeLines: AMapPolyline[] = [];
+let amapLoadPromise: Promise<AMapNamespace> | null = null;
 
 const routeColors = ['#1d4ed8', '#0f766e', '#b45309', '#7c3aed', '#be123c', '#0369a1'];
-const routeCollection = computed<GeoJSON.FeatureCollection>(() => ({
-  type: 'FeatureCollection',
-  features: props.routes
-    .filter((route) => routeCoordinates(route).length >= 2)
-    .map((route, index) => ({
-      type: 'Feature',
-      properties: {
-        day: route.day,
-        color: routeColors[index % routeColors.length]
-      },
-      geometry: {
-        type: 'LineString',
-        coordinates: routeCoordinates(route).map(toLngLat)
-      }
-    }))
-}));
-
-const stopCollection = computed<GeoJSON.FeatureCollection>(() => ({
-  type: 'FeatureCollection',
-  features: props.routes.flatMap((route, routeIndex) =>
-    route.stops.map((stop, stopIndex) => ({
-      type: 'Feature',
-      properties: {
-        day: route.day,
-        stopIndex: stopIndex + 1,
-        title: stop.poi.name,
-        subtitle: `${stop.arrival_time}-${stop.departure_time}`,
-        color: routeColors[routeIndex % routeColors.length]
-      },
-      geometry: {
-        type: 'Point',
-        coordinates: toLngLat(stop.poi.coordinates)
-      }
-    }))
-  )
-}));
 
 onMounted(async () => {
   await nextTick();
-  initializeMap();
+  void initializeMap();
 });
 
 onBeforeUnmount(() => {
-  clearMarkers();
-  map?.remove();
+  clearOverlays();
+  infoWindow?.close();
+  infoWindow = null;
+  map?.destroy();
   map = null;
 });
 
@@ -74,120 +116,167 @@ watch(
   { deep: true }
 );
 
-function initializeMap() {
+async function initializeMap() {
   if (!mapContainer.value || map) {
     return;
   }
 
-  const token = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
-  if (token) {
-    mapboxgl.accessToken = token;
-  }
-
   try {
-    map = new mapboxgl.Map({
-      container: mapContainer.value,
-      style: token ? 'mapbox://styles/mapbox/streets-v12' : osmRasterStyle(),
+    const amap = await loadAmap();
+    if (!mapContainer.value || map) {
+      return;
+    }
+
+    const currentMap = new amap.Map(mapContainer.value, {
       center: defaultCenter(),
-      zoom: 12,
-      attributionControl: true
+      mapStyle: 'amap://styles/normal',
+      resizeEnable: true,
+      viewMode: '2D',
+      zoom: 12
     });
-    map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right');
-    map.addControl(new mapboxgl.ScaleControl({ unit: 'metric' }), 'bottom-left');
-    map.on('load', () => {
+    map = currentMap;
+    infoWindow = new amap.InfoWindow({
+      autoMove: true,
+      offset: new amap.Pixel(0, -18)
+    });
+
+    amap.plugin(['AMap.ToolBar', 'AMap.Scale'], () => {
+      if (!map || currentMap !== map) {
+        return;
+      }
+      if (amap.ToolBar) {
+        currentMap.addControl(new amap.ToolBar({ position: 'RT' }));
+      }
+      if (amap.Scale) {
+        currentMap.addControl(new amap.Scale());
+      }
+    });
+
+    currentMap.on('complete', () => {
       mapReady.value = true;
-      addRouteLayers();
       renderRoutes();
     });
-    map.on('error', (event) => {
-      mapError.value = event.error?.message ?? 'Map failed to load.';
-    });
   } catch (error) {
-    mapError.value = error instanceof Error ? error.message : 'Map initialization failed.';
+    mapError.value = error instanceof Error ? error.message : 'Amap initialization failed.';
   }
 }
 
-function addRouteLayers() {
-  if (!map) {
-    return;
+function loadAmap(): Promise<AMapNamespace> {
+  if (window.AMap) {
+    return Promise.resolve(window.AMap);
   }
-  if (!map.getSource('trip-routes')) {
-    map.addSource('trip-routes', {
-      type: 'geojson',
-      data: routeCollection.value
-    });
+  if (amapLoadPromise) {
+    return amapLoadPromise;
   }
-  if (!map.getSource('trip-stops')) {
-    map.addSource('trip-stops', {
-      type: 'geojson',
-      data: stopCollection.value
-    });
-  }
-  if (!map.getLayer('trip-route-lines')) {
-    map.addLayer({
-      id: 'trip-route-lines',
-      type: 'line',
-      source: 'trip-routes',
-      layout: {
-        'line-cap': 'round',
-        'line-join': 'round'
-      },
-      paint: {
-        'line-color': ['get', 'color'],
-        'line-width': 5,
-        'line-opacity': 0.9
-      }
-    });
-  }
-  if (!map.getLayer('trip-route-halo')) {
-    map.addLayer(
-      {
-        id: 'trip-route-halo',
-        type: 'line',
-        source: 'trip-routes',
-        layout: {
-          'line-cap': 'round',
-          'line-join': 'round'
-        },
-        paint: {
-          'line-color': '#ffffff',
-          'line-width': 9,
-          'line-opacity': 0.72
-        }
-      },
-      'trip-route-lines'
+
+  const key = (import.meta.env.VITE_AMAP_JS_KEY || import.meta.env.VITE_AMAP_API_KEY) as
+    | string
+    | undefined;
+  if (!key) {
+    return Promise.reject(
+      new Error('Missing VITE_AMAP_JS_KEY. Set a Gaode Web JS API key before loading the route map.')
     );
   }
+
+  const securityCode = import.meta.env.VITE_AMAP_SECURITY_CODE as string | undefined;
+  if (securityCode) {
+    window._AMapSecurityConfig = {
+      securityJsCode: securityCode
+    };
+  }
+
+  amapLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.async = true;
+    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(
+      key
+    )}&plugin=AMap.ToolBar,AMap.Scale`;
+    script.onload = () => {
+      if (window.AMap) {
+        resolve(window.AMap);
+        return;
+      }
+      reject(new Error('Amap JS API loaded without exposing window.AMap.'));
+    };
+    script.onerror = () => reject(new Error('Failed to load Amap JS API.'));
+    document.head.appendChild(script);
+  });
+
+  return amapLoadPromise;
 }
 
 function renderRoutes() {
-  if (!map) {
+  if (!map || !window.AMap) {
     return;
   }
-  (map.getSource('trip-routes') as GeoJSONSource | undefined)?.setData(routeCollection.value);
-  (map.getSource('trip-stops') as GeoJSONSource | undefined)?.setData(stopCollection.value);
-  renderMarkers();
+  clearOverlays();
+  renderRouteLines(window.AMap);
+  renderMarkers(window.AMap);
   fitToRoutes();
 }
 
-function renderMarkers() {
+function renderRouteLines(amap: AMapNamespace) {
+  props.routes.forEach((route, routeIndex) => {
+    const path = routeCoordinates(route).map(toLngLat);
+    if (path.length < 2 || !map) {
+      return;
+    }
+    const color = routeColors[routeIndex % routeColors.length];
+    const halo = new amap.Polyline({
+      lineCap: 'round',
+      lineJoin: 'round',
+      path,
+      strokeColor: '#ffffff',
+      strokeOpacity: 0.72,
+      strokeWeight: 9,
+      zIndex: 20
+    });
+    const line = new amap.Polyline({
+      lineCap: 'round',
+      lineJoin: 'round',
+      path,
+      showDir: true,
+      strokeColor: color,
+      strokeOpacity: 0.9,
+      strokeWeight: 5,
+      zIndex: 21
+    });
+    halo.setMap(map);
+    line.setMap(map);
+    routeLines.push(halo, line);
+  });
+}
+
+function renderMarkers(amap: AMapNamespace) {
   if (!map) {
     return;
   }
   const currentMap = map;
-  clearMarkers();
   props.routes.forEach((route, routeIndex) => {
     route.stops.forEach((stop, stopIndex) => {
       const markerNode = document.createElement('button');
       markerNode.type = 'button';
-      markerNode.className = 'mapbox-stop-marker';
+      markerNode.className = 'amap-stop-marker';
       markerNode.style.setProperty('--marker-color', routeColors[routeIndex % routeColors.length]);
       markerNode.textContent = String(stopIndex + 1);
-      const popup = new mapboxgl.Popup({ offset: 20 }).setHTML(popupHtml(route, stop, stopIndex));
-      const marker = new mapboxgl.Marker({ element: markerNode, anchor: 'center' })
-        .setLngLat(toLngLat(stop.poi.coordinates))
-        .setPopup(popup)
-        .addTo(currentMap);
+      markerNode.setAttribute('aria-label', `${route.day}.${stopIndex + 1} ${stop.poi.name}`);
+
+      const position = toLngLat(stop.poi.coordinates);
+      const marker = new amap.Marker({
+        anchor: 'center',
+        content: markerNode,
+        offset: new amap.Pixel(0, 0),
+        position,
+        zIndex: 30
+      });
+      marker.on('click', () => {
+        if (!infoWindow) {
+          return;
+        }
+        infoWindow.setContent(popupHtml(route, stop, stopIndex));
+        infoWindow.open(currentMap, position);
+      });
+      marker.setMap(currentMap);
       markers.push(marker);
     });
   });
@@ -199,21 +288,22 @@ function fitToRoutes() {
   }
   const coordinates = allCoordinates();
   if (!coordinates.length) {
-    map.easeTo({ center: defaultCenter(), zoom: 12, duration: 500 });
+    map.setZoomAndCenter(12, defaultCenter());
     return;
   }
 
-  const bounds = new mapboxgl.LngLatBounds(toLngLat(coordinates[0]), toLngLat(coordinates[0]));
-  coordinates.forEach((coordinate) => bounds.extend(toLngLat(coordinate)));
-  map.fitBounds(bounds as LngLatBoundsLike, {
-    padding: { top: 44, right: 44, bottom: 58, left: 44 },
-    maxZoom: 15,
-    duration: 700
-  });
+  const overlays = [...routeLines, ...markers];
+  if (overlays.length) {
+    map.setFitView(overlays, false, [44, 44, 58, 44], 15);
+    return;
+  }
+  map.setZoomAndCenter(12, defaultCenter());
 }
 
-function clearMarkers() {
-  markers.forEach((marker) => marker.remove());
+function clearOverlays() {
+  routeLines.forEach((line) => line.setMap(null));
+  markers.forEach((marker) => marker.setMap(null));
+  routeLines = [];
   markers = [];
 }
 
@@ -231,7 +321,7 @@ function allCoordinates(): Coordinates[] {
   ]);
 }
 
-function defaultCenter(): [number, number] {
+function defaultCenter(): AMapLngLat {
   const coordinates = allCoordinates();
   if (!coordinates.length) {
     return [121.4737, 31.2304];
@@ -241,15 +331,17 @@ function defaultCenter(): [number, number] {
   return [lng, lat];
 }
 
-function toLngLat(coordinate: Coordinates): [number, number] {
+function toLngLat(coordinate: Coordinates): AMapLngLat {
   return [coordinate.lng, coordinate.lat];
 }
 
 function popupHtml(route: DayRoute, stop: RouteStop, stopIndex: number): string {
   return `
-    <strong>D${route.day}.${stopIndex + 1} ${escapeHtml(stop.poi.name)}</strong>
-    <span>${escapeHtml(stop.arrival_time)}-${escapeHtml(stop.departure_time)}</span>
-    <span>${escapeHtml(stop.inbound_mode ?? 'Start')} 路 ¥${stop.inbound_cost.toFixed(2)}</span>
+    <div class="amap-popup-content">
+      <strong>D${route.day}.${stopIndex + 1} ${escapeHtml(stop.poi.name)}</strong>
+      <span>${escapeHtml(stop.arrival_time)}-${escapeHtml(stop.departure_time)}</span>
+      <span>${escapeHtml(stop.inbound_mode ?? 'Start')} 交通 ¥${stop.inbound_cost.toFixed(2)}</span>
+    </div>
   `;
 }
 
@@ -261,32 +353,11 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 }
-
-function osmRasterStyle(): Style {
-  return {
-    version: 8,
-    sources: {
-      osm: {
-        type: 'raster' as const,
-        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-        tileSize: 256,
-        attribution: '© OpenStreetMap contributors'
-      }
-    },
-    layers: [
-      {
-        id: 'osm',
-        type: 'raster' as const,
-        source: 'osm'
-      }
-    ]
-  };
-}
 </script>
 
 <template>
   <section class="map-shell" aria-label="Route map">
-    <div ref="mapContainer" class="mapbox-canvas" />
+    <div ref="mapContainer" class="amap-canvas" />
     <div v-if="!routes.length" class="map-empty">
       Build a trip to render the route on the map.
     </div>

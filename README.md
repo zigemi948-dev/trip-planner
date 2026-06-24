@@ -100,15 +100,18 @@ python backend\scripts\run_mcp_server.py
 Use the in-process server only for local testing. Real POI, hotel, weather, and
 distance-matrix facts should come through `TRIP_MCP_HTTP_URL`.
 
-## Mapbox GL Frontend
+## Amap JS Frontend
 
-The frontend route map uses Mapbox GL. Set a Mapbox token when you want Mapbox
-hosted styles:
+The frontend route map uses Amap JSAPI 2.0. Set a Gaode Web JS API key before
+starting Vite:
 
 ```powershell
-$env:VITE_MAPBOX_TOKEN="your-mapbox-token"
+$env:VITE_AMAP_JS_KEY="your-amap-js-key"
+# Optional, when your Amap Web JSAPI app has a security code enabled:
+$env:VITE_AMAP_SECURITY_CODE="your-amap-security-code"
 npm run dev
 ```
 
-When `VITE_MAPBOX_TOKEN` is not set, the map falls back to OpenStreetMap raster
-tiles so local development still shows a real basemap.
+`VITE_AMAP_API_KEY` is also accepted for local convenience, but
+`VITE_AMAP_JS_KEY` is preferred so the browser key is distinct from backend MCP
+or Web Service keys.
