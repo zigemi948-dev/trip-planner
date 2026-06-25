@@ -68,13 +68,13 @@ async function parseRequest() {
 
 function temperatureLabel(min: number | null, max: number | null): string {
   if (min !== null && max !== null) {
-    return `${Math.round(min)}-${Math.round(max)} C`;
+    return `${Math.round(min)}-${Math.round(max)} °C`;
   }
   if (max !== null) {
-    return `${Math.round(max)} C`;
+    return `${Math.round(max)} °C`;
   }
   if (min !== null) {
-    return `${Math.round(min)} C`;
+    return `${Math.round(min)} °C`;
   }
   return 'Temp unavailable';
 }
