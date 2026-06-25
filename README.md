@@ -18,7 +18,7 @@
 
 - MVP 演示完成度：约 80%。
 - 生产级完成度：约 60%-65%。
-- 后端测试通过：`52 passed, 1 skipped`。
+- 后端测试通过：`53 passed`。
 - 前端类型检查通过；Vite 可在临时输出目录构建成功。
 
 主要限制：
@@ -267,7 +267,7 @@ Invoke-RestMethod `
 
 最近一次检查结果：
 
-- 后端：`52 passed, 1 skipped`。
+- 后端：`53 passed`。
 - 前端：`npx.cmd vue-tsc --noEmit` 通过。
 - 前端：`npx.cmd vite build --outDir ..\run-logs\frontend-build-check --emptyOutDir` 通过。
 - 前端默认 `npm.cmd run build` 可能因 `frontend/dist/assets` 权限失败。

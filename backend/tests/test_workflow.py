@@ -33,7 +33,7 @@ from app.services.job_service import JobStore
 from app.services.matrix_service import build_time_dependent_matrix_with_source, matrix_cache
 from app.services.mcp_client import MCPToolError, _mcp_endpoint_url, call_tool
 
-TEST_OUTPUT_DIR = BACKEND_ROOT / "test-output"
+TEST_OUTPUT_DIR = BACKEND_ROOT.parent / "run-logs" / "test-output"
 
 
 def _writable_test_dir(*parts: str) -> Path:
@@ -961,8 +961,8 @@ def test_budget_repair_can_prune_more_than_three_candidates(monkeypatch: pytest.
     assert state.routing_solution.budget_breakdown.total_cost <= 260
 
 
-def test_job_store_keeps_completed_state_and_events(tmp_path: Path):
-    store_path = tmp_path / f"{uuid4().hex}.jsonl"
+def test_job_store_keeps_completed_state_and_events():
+    store_path = _writable_test_dir("jobs", uuid4().hex) / "jobs.jsonl"
     store = JobStore(storage_path=store_path)
     submitted = store.submit(
         IntentConstraints(user_query="demo", destination="Shanghai", days=1, budget_limit=800)
@@ -976,8 +976,8 @@ def test_job_store_keeps_completed_state_and_events(tmp_path: Path):
     assert restored.get(job.id) == job
 
 
-def test_job_store_submit_returns_before_workflow_finishes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    store_path = tmp_path / f"{uuid4().hex}.jsonl"
+def test_job_store_submit_returns_before_workflow_finishes(monkeypatch: pytest.MonkeyPatch):
+    store_path = _writable_test_dir("jobs", uuid4().hex) / "jobs.jsonl"
     store = JobStore(storage_path=store_path)
     workflow_started = Event()
     release_workflow = Event()
@@ -1007,8 +1007,8 @@ def test_job_store_submit_returns_before_workflow_finishes(monkeypatch: pytest.M
     assert any(event["event"] == "fake_stage" or event["event"] == "stage_complete" for event in completed.events)
 
 
-def test_job_store_returns_incremental_events(tmp_path: Path):
-    store_path = tmp_path / f"{uuid4().hex}.jsonl"
+def test_job_store_returns_incremental_events():
+    store_path = _writable_test_dir("jobs", uuid4().hex) / "jobs.jsonl"
     store = JobStore(storage_path=store_path)
     submitted = store.submit(
         IntentConstraints(user_query="demo", destination="Shanghai", days=1, budget_limit=800)
