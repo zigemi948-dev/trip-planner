@@ -36,6 +36,7 @@ export interface RouteStop {
   inbound_boarding_station: string;
   inbound_alighting_station: string;
   inbound_transit_note: string;
+  inbound_geometry?: Coordinates[];
 }
 
 export interface DayCostBreakdown {
@@ -200,4 +201,13 @@ export interface PlanningJobSummary {
   status: JobStatus;
   destination: string;
   days: number;
+  event_count: number;
+}
+
+export interface PlanningJobEvents {
+  job_id: string;
+  status: JobStatus;
+  events: WorkflowEvent[];
+  next_offset: number;
+  state: TripState | null;
 }

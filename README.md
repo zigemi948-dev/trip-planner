@@ -18,17 +18,17 @@
 
 - MVP 演示完成度：约 80%。
 - 生产级完成度：约 60%-65%。
-- 后端测试主体通过：`45 passed, 3 skipped`，另有 1 个 Job 持久化测试在当前 Windows 权限环境下失败。
+- 后端测试通过：`52 passed, 1 skipped`。
 - 前端类型检查通过；Vite 可在临时输出目录构建成功。
 
 主要限制：
 
 - 高德价格字段已接入，但酒店房态、景点门票和餐饮实时成交价不是全量真实价格。
-- 高德/方向服务可回填道路 polyline；缺失时仍降级为后端插值连线。
+- 高德 REST 或 MCP 方向服务可回填道路 polyline；缺失时仍降级为后端插值连线。
 - 前端重规划目前是固定按钮插入示例 POI，不是拖拽交互。
 - WebSocket 已推送 solver 代际 fitness；前端展示仍偏轻量。
 - HTML 导出已实现，PDF/PNG/Headless Chrome 导出未实现。
-- `backend/data/jobs.jsonl` 在部分 Windows 权限环境下可能写入失败。
+- `backend/data/jobs.jsonl` 在部分 Windows 权限环境下可能无法落盘；Job 会保留在内存中，重启恢复需要配置可写路径。
 
 ## 技术栈
 
@@ -267,8 +267,7 @@ Invoke-RestMethod `
 
 最近一次检查结果：
 
-- 后端：`40 passed, 3 skipped, 1 failed`。
-- 后端唯一失败：`test_job_events_endpoint_when_fastapi_is_available`，原因是当前环境拒绝写入 `backend/data/jobs.jsonl`。
+- 后端：`52 passed, 1 skipped`。
 - 前端：`npx.cmd vue-tsc --noEmit` 通过。
 - 前端：`npx.cmd vite build --outDir ..\run-logs\frontend-build-check --emptyOutDir` 通过。
 - 前端默认 `npm.cmd run build` 可能因 `frontend/dist/assets` 权限失败。
@@ -304,7 +303,7 @@ Invoke-RestMethod `
 
 ### P4：算法增强（已落地）
 
-- 已使用高德/方向服务返回的道路 polyline 填充路线几何，缺失时继续使用插值兜底。
+- 已使用高德 REST 或 MCP 方向服务返回的道路 polyline 填充路线几何，缺失时继续使用插值兜底。
 - 已让 WebSocket 推送 NSGA-II 每代最佳 fitness，前端可观察求解收敛过程。
 - 已增加 POI 替代策略：预算超标时优先用更便宜的同类 POI 替换，而不是只删除。
 - 已按多日预算压力分配 POI，降低前几天过度消耗固定预算的概率。

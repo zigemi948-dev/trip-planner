@@ -3,6 +3,7 @@ import {
   checkHealth,
   exportTrip,
   exportTripFile,
+  fetchPlanningJobEvents,
   listPlanningJobs,
   loadRuntimeCapabilities,
   loadDemoTrip,
@@ -18,6 +19,7 @@ import type {
   HealthResponse,
   IntegrationProbeResponse,
   PlanningJob,
+  PlanningJobEvents,
   PlanningJobSummary,
   POICandidate,
   RuntimeCapabilities,
@@ -40,7 +42,9 @@ export const useTripStore = defineStore('trip', {
     probingIntegrations: false,
     parsedIntent: null as PlanTripRequest | null,
     streamEvents: [] as WorkflowEvent[],
-    streaming: false
+    streaming: false,
+    jobEventOffset: 0,
+    jobPollingTimer: null as number | null
   }),
   actions: {
     async checkBackend() {
@@ -179,19 +183,65 @@ export const useTripStore = defineStore('trip', {
       }
     },
     async submitJob(payload: PlanTripRequest) {
+      this.stopJobPolling();
       this.loading = true;
       this.error = '';
+      this.streamEvents = [];
       try {
         const job = await submitPlanningJob(payload);
         this.activeJob = job;
-        if (job.state) {
-          this.trip = job.state;
-        }
+        this.jobEventOffset = 0;
         await this.refreshJobs();
+        await this.pollJob(job.id);
+        if (!['complete', 'failed'].includes(this.activeJob?.status ?? '')) {
+          this.startJobPolling(job.id);
+        }
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
         this.loading = false;
+      }
+    },
+    startJobPolling(jobId: string) {
+      this.stopJobPolling();
+      this.jobPollingTimer = window.setInterval(() => {
+        void this.pollJob(jobId);
+      }, 1000);
+    },
+    stopJobPolling() {
+      if (this.jobPollingTimer !== null) {
+        window.clearInterval(this.jobPollingTimer);
+        this.jobPollingTimer = null;
+      }
+    },
+    async pollJob(jobId: string) {
+      try {
+        const eventWindow = await fetchPlanningJobEvents(jobId, this.jobEventOffset);
+        this.applyJobEventWindow(eventWindow);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : 'Unknown error';
+        this.stopJobPolling();
+      }
+    },
+    applyJobEventWindow(eventWindow: PlanningJobEvents) {
+      this.jobEventOffset = eventWindow.next_offset;
+      if (eventWindow.events.length) {
+        this.streamEvents.push(...eventWindow.events);
+      }
+      if (this.activeJob?.id === eventWindow.job_id) {
+        this.activeJob = {
+          ...this.activeJob,
+          status: eventWindow.status,
+          events: [...this.activeJob.events, ...eventWindow.events],
+          state: eventWindow.state ?? this.activeJob.state
+        };
+      }
+      if (eventWindow.state) {
+        this.trip = eventWindow.state;
+      }
+      if (['complete', 'failed'].includes(eventWindow.status)) {
+        this.stopJobPolling();
+        void this.refreshJobs();
       }
     },
     async refreshJobs() {

@@ -3,6 +3,7 @@ import type {
   IntegrationProbeResponse,
   IntentConstraints,
   PlanningJob,
+  PlanningJobEvents,
   PlanningJobSummary,
   ReplanRequest,
   RoutingSolution,
@@ -121,6 +122,14 @@ export async function listPlanningJobs(): Promise<PlanningJobSummary[]> {
   const response = await fetch(`${API_BASE}/trips/jobs`);
   if (!response.ok) {
     throw new Error(`Job list request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchPlanningJobEvents(jobId: string, after = 0): Promise<PlanningJobEvents> {
+  const response = await fetch(`${API_BASE}/trips/jobs/${jobId}/events?after=${after}`);
+  if (!response.ok) {
+    throw new Error(`Job events request failed: ${response.status}`);
   }
   return response.json();
 }

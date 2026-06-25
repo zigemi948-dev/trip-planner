@@ -118,7 +118,10 @@ def compute_bounds(points: list[Coordinates]) -> BoundingBox | None:
 def attach_route_geometry(hotel: POICandidate, route: DayRoute) -> DayRoute:
     """Attach simplified geometry and bounds to a day route."""
     dense = build_route_geometry(hotel, route)
-    simplified = simplify_geometry(dense)
+    if any(stop.inbound_geometry for stop in route.stops):
+        simplified = dense
+    else:
+        simplified = simplify_geometry(dense)
     route.geometry = simplified
     route.bounds = compute_bounds(simplified)
     return route

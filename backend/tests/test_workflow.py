@@ -1,4 +1,6 @@
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 from uuid import uuid4
 
 import pytest
@@ -8,12 +10,12 @@ from app.algorithms.clustering import cluster_by_day
 from app.algorithms.matrix_builder import build_fallback_matrix, matrix_key
 from app.algorithms.matrix_builder import choose_mode
 from app.algorithms.budget_pruner import remove_budget_candidate
-from app.algorithms.geometry import build_route_geometry, simplify_geometry
+from app.algorithms.geometry import attach_route_geometry, build_route_geometry, simplify_geometry
 from app.algorithms.geo import haversine_km
 from app.algorithms.vrp_solver import solve_routes
 from app.algorithms import vrp_solver
 from app.core.config import BACKEND_ROOT, resolve_backend_path
-from app.graph.state import Coordinates, DayRoute, ExportRequest, FinancialContext, IntentConstraints, MatrixEdge, POICandidate, ReplanRequest, RouteStop, TransportMode, TripState
+from app.graph.state import Coordinates, DayRoute, ExportRequest, FinancialContext, IntentConstraints, MatrixEdge, PlanningJob, POICandidate, ReplanRequest, RouteStop, TransportMode, TripState
 from app.graph import nodes as workflow_nodes
 from app.services import provider_adapters
 from app.services.amap_service import AmapUnavailableError, _poi_from_amap
@@ -45,6 +47,17 @@ def _writable_test_dir(*parts: str) -> Path:
     except OSError as exc:
         pytest.skip(f"filesystem persistence tests need a writable directory: {exc}")
     return directory
+
+
+def _wait_for_job(store: JobStore, job_id: str, timeout_seconds: float = 10) -> PlanningJob:
+    deadline = monotonic() + timeout_seconds
+    while monotonic() < deadline:
+        job = store.get(job_id)
+        if job is not None and job.status in {"complete", "failed"}:
+            return job
+        sleep(0.05)
+    job = store.get(job_id)
+    raise AssertionError(f"job {job_id} did not finish; latest={job}")
 
 
 def test_haversine_returns_reasonable_distance():
@@ -645,12 +658,55 @@ def test_matrix_builder_reads_road_tensor_through_geo_fact_layer(monkeypatch: py
         }
 
     monkeypatch.setattr("app.services.matrix_service.settings.provider_mode", "amap")
+    monkeypatch.setattr("app.services.matrix_service.amap_is_enabled", lambda: False)
     monkeypatch.setattr("app.services.matrix_service.build_time_dependent_matrix_facts", fake_matrix)
 
     matrix, source = build_time_dependent_matrix_with_source([hotel, museum], FinancialContext())
 
     assert source == "amap:mcp"
     assert matrix[matrix_key("hotel", "museum", 9)].duration_minutes == 12
+    matrix_cache.clear()
+
+
+def test_matrix_builder_prefers_rest_amap_polyline_when_api_key_exists(monkeypatch: pytest.MonkeyPatch):
+    matrix_cache.clear()
+    hotel = POICandidate(
+        id="hotel",
+        name="Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.2328, lng=121.4752),
+        visit_duration_minutes=0,
+    )
+    museum = POICandidate(
+        id="museum",
+        name="Museum",
+        category="museum",
+        coordinates=Coordinates(lat=31.2304, lng=121.4737),
+    )
+    bend = Coordinates(lat=31.2315, lng=121.481)
+
+    def fake_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) -> dict[str, MatrixEdge]:
+        return {
+            matrix_key("hotel", "museum", 9): MatrixEdge(
+                origin_id="hotel",
+                destination_id="museum",
+                hour=9,
+                distance_km=1.5,
+                duration_minutes=12,
+                mode=TransportMode.driving,
+                cost=18,
+                polyline=[hotel.coordinates, bend, museum.coordinates],
+            )
+        }
+
+    monkeypatch.setattr("app.services.matrix_service.settings.provider_mode", "amap")
+    monkeypatch.setattr("app.services.matrix_service.amap_is_enabled", lambda: True)
+    monkeypatch.setattr("app.services.matrix_service.build_amap_matrix", fake_amap_matrix)
+
+    matrix, source = build_time_dependent_matrix_with_source([hotel, museum], FinancialContext())
+
+    assert source == "amap:rest"
+    assert matrix[matrix_key("hotel", "museum", 9)].polyline == [hotel.coordinates, bend, museum.coordinates]
     matrix_cache.clear()
 
 
@@ -905,27 +961,59 @@ def test_budget_repair_can_prune_more_than_three_candidates(monkeypatch: pytest.
     assert state.routing_solution.budget_breakdown.total_cost <= 260
 
 
-def test_job_store_keeps_completed_state_and_events():
-    store_path = _writable_test_dir("jobs") / f"{uuid4().hex}.jsonl"
+def test_job_store_keeps_completed_state_and_events(tmp_path: Path):
+    store_path = tmp_path / f"{uuid4().hex}.jsonl"
     store = JobStore(storage_path=store_path)
-    job = store.submit(
+    submitted = store.submit(
         IntentConstraints(user_query="demo", destination="Shanghai", days=1, budget_limit=800)
     )
+    job = _wait_for_job(store, submitted.id)
     restored = JobStore(storage_path=store_path)
 
     assert job.status == "complete"
     assert job.state is not None
     assert any(event["event"] == "stage_complete" for event in job.events)
     assert restored.get(job.id) == job
-    store_path.unlink(missing_ok=True)
 
 
-def test_job_store_returns_incremental_events():
-    store_path = _writable_test_dir("jobs") / f"{uuid4().hex}.jsonl"
+def test_job_store_submit_returns_before_workflow_finishes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    store_path = tmp_path / f"{uuid4().hex}.jsonl"
     store = JobStore(storage_path=store_path)
+    workflow_started = Event()
+    release_workflow = Event()
+
+    def fake_workflow(intent: IntentConstraints):
+        workflow_started.set()
+        release_workflow.wait(timeout=5)
+        state = TripState(intent_constraints=intent)
+        yield "fake_stage", state
+
+    monkeypatch.setattr("app.services.job_service.iter_trip_workflow", fake_workflow)
+
     job = store.submit(
         IntentConstraints(user_query="demo", destination="Shanghai", days=1, budget_limit=800)
     )
+
+    assert job.status == "queued"
+    assert workflow_started.wait(timeout=2)
+    running = store.get(job.id)
+    assert running is not None
+    assert running.status == "running"
+
+    release_workflow.set()
+    completed = _wait_for_job(store, job.id)
+
+    assert completed.status == "complete"
+    assert any(event["event"] == "fake_stage" or event["event"] == "stage_complete" for event in completed.events)
+
+
+def test_job_store_returns_incremental_events(tmp_path: Path):
+    store_path = tmp_path / f"{uuid4().hex}.jsonl"
+    store = JobStore(storage_path=store_path)
+    submitted = store.submit(
+        IntentConstraints(user_query="demo", destination="Shanghai", days=1, budget_limit=800)
+    )
+    job = _wait_for_job(store, submitted.id)
 
     first_window = store.events_since(job.id, 0)
     second_window = store.events_since(job.id, 2)
@@ -935,7 +1023,6 @@ def test_job_store_returns_incremental_events():
     assert first_window.next_offset == len(job.events)
     assert second_window.events == job.events[2:]
     assert first_window.state is not None
-    store_path.unlink(missing_ok=True)
 
 
 def test_job_events_endpoint_when_fastapi_is_available():
@@ -958,10 +1045,16 @@ def test_job_events_endpoint_when_fastapi_is_available():
     )
     job_id = job_response.json()["id"]
 
-    response = client.get(f"/api/trips/jobs/{job_id}/events?after=1")
+    payload = None
+    for _ in range(100):
+        response = client.get(f"/api/trips/jobs/{job_id}/events?after=1")
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["status"] in {"complete", "failed"}:
+            break
+        sleep(0.05)
 
-    assert response.status_code == 200
-    payload = response.json()
+    assert payload is not None
     assert payload["job_id"] == job_id
     assert payload["next_offset"] >= 1
     assert payload["status"] == "complete"
@@ -1066,6 +1159,81 @@ def test_route_geometry_prefers_provider_polyline():
     assert bend in geometry
     assert geometry[0] == hotel.coordinates
     assert geometry[-1] == hotel.coordinates
+
+
+def test_attached_route_geometry_preserves_provider_polyline_for_frontend():
+    hotel = POICandidate(
+        id="hotel",
+        name="Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.23, lng=121.47),
+    )
+    poi = POICandidate(
+        id="poi",
+        name="POI",
+        category="museum",
+        coordinates=Coordinates(lat=31.24, lng=121.48),
+    )
+    bend = Coordinates(lat=31.235, lng=121.485)
+    route = DayRoute(
+        day=1,
+        stops=[
+            RouteStop(
+                poi=poi,
+                day=1,
+                arrival_time="09:15",
+                departure_time="10:15",
+                inbound_geometry=[hotel.coordinates, bend, poi.coordinates],
+            )
+        ],
+        total_minutes=75,
+        total_cost=0,
+        fitness_score=1,
+    )
+
+    route = attach_route_geometry(hotel, route)
+
+    assert bend in route.geometry
+    assert route.geometry[0] == hotel.coordinates
+    assert route.geometry[-1] == hotel.coordinates
+
+
+def test_solver_carries_matrix_polyline_into_route_geometry():
+    hotel = POICandidate(
+        id="hotel",
+        name="Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.23, lng=121.47),
+        visit_duration_minutes=0,
+    )
+    poi = POICandidate(
+        id="poi",
+        name="POI",
+        category="museum",
+        coordinates=Coordinates(lat=31.24, lng=121.48),
+        visit_duration_minutes=60,
+        utility=8,
+    )
+    bend = Coordinates(lat=31.235, lng=121.485)
+    matrix = {
+        matrix_key("hotel", "poi", hour): MatrixEdge(
+            origin_id="hotel",
+            destination_id="poi",
+            hour=hour,
+            distance_km=2,
+            duration_minutes=15,
+            mode=TransportMode.driving,
+            cost=12,
+            polyline=[hotel.coordinates, bend, poi.coordinates],
+        )
+        for hour in range(24)
+    }
+
+    routes = solve_routes(hotel, [poi], days=1, matrix=matrix, day_start="09:00", day_end="18:00")
+
+    assert bend in routes[0].geometry
+    assert routes[0].geometry[0] == hotel.coordinates
+    assert routes[0].geometry[-1] == hotel.coordinates
 
 
 def test_direction_fact_parses_provider_polyline():

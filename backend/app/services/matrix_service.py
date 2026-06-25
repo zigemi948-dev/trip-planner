@@ -5,6 +5,7 @@ from hashlib import sha1
 from app.algorithms.matrix_builder import build_fallback_matrix
 from app.core.config import settings
 from app.graph.state import FinancialContext, MatrixEdge, POICandidate
+from app.services.amap_service import AmapUnavailableError, amap_is_enabled, build_amap_matrix
 from app.services.cache_service import MemoryCache
 from app.services.geo_fact_service import GeoFactUnavailableError, build_time_dependent_matrix_facts
 
@@ -59,12 +60,16 @@ def build_time_dependent_matrix_with_source(
 
     if settings.provider_mode.lower() == "amap":
         try:
-            try:
-                matrix = build_time_dependent_matrix_facts(nodes, financial, city)
-            except TypeError:
-                matrix = build_time_dependent_matrix_facts(nodes, financial)
-            source = "amap:mcp"
-        except GeoFactUnavailableError:
+            if amap_is_enabled():
+                matrix = build_amap_matrix(nodes, financial)
+                source = "amap:rest"
+            else:
+                try:
+                    matrix = build_time_dependent_matrix_facts(nodes, financial, city)
+                except TypeError:
+                    matrix = build_time_dependent_matrix_facts(nodes, financial)
+                source = "amap:mcp"
+        except (AmapUnavailableError, GeoFactUnavailableError):
             matrix = build_fallback_matrix(nodes, financial)
             source = "fallback"
     else:
