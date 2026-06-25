@@ -13,7 +13,8 @@ import {
   replanTrip,
   streamTripPlan,
   submitPlanningJob,
-  type PlanTripRequest
+  type PlanTripRequest,
+  type ExportFormat 
 } from '../api/trips';
 import type {
   HealthResponse,
@@ -154,28 +155,30 @@ export const useTripStore = defineStore('trip', {
         this.loading = false;
       }
     },
-    async exportCurrent() {
+
+    async exportCurrent(format: ExportFormat = 'html') {
       if (!this.trip) {
         return;
       }
       this.loading = true;
       this.error = '';
       try {
-        this.exportPayload = await exportTrip(this.trip.routing_solution, 'html');
+        this.exportPayload = await exportTrip(this.trip.routing_solution, format);
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
         this.loading = false;
       }
     },
-    async exportCurrentFile() {
+
+    async exportCurrentFile(format: ExportFormat = 'html') {
       if (!this.trip) {
         return;
       }
       this.loading = true;
       this.error = '';
       try {
-        this.exportPayload = await exportTripFile(this.trip.routing_solution, 'html');
+        this.exportPayload = await exportTripFile(this.trip.routing_solution, format);
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {

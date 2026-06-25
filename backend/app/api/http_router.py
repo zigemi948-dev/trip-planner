@@ -47,12 +47,24 @@ def replan_trip(request: ReplanRequest) -> TripState:
 @router.post("/trips/export")
 def export_trip(request: ExportRequest) -> dict[str, str]:
     """Return an export payload for the solved trip."""
+    valid_formats = {"html", "pdf", "png"}
+    if request.export_format not in valid_formats:
+        raise HTTPException(
+            status_code=422, 
+            detail=f"Unsupported export format '{request.export_format}'. Permitted values: {', '.join(valid_formats)}"
+        )
     return render_export_payload(request.solution, request.export_format)
 
 
 @router.post("/trips/export/file")
 def export_trip_file(request: ExportRequest) -> dict[str, str]:
     """Persist an export artifact and return its absolute file path."""
+    valid_formats = {"html", "pdf", "png"}
+    if request.export_format not in valid_formats:
+        raise HTTPException(
+            status_code=422, 
+            detail=f"Unsupported export format '{request.export_format}'. Permitted values: {', '.join(valid_formats)}"
+        )
     return persist_export_payload(request.solution, request.export_format)
 
 

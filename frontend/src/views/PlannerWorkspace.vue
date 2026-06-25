@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import BudgetDashboard from '../components/BudgetDashboard.vue';
 import MapViewer from '../components/MapViewer.vue';
 import RouteEditor from '../components/RouteEditor.vue';
 import SolverMonitor from '../components/SolverMonitor.vue';
 import { useTripStore } from '../stores/tripStore';
 import type { POICandidate } from '../types/trip';
+import type { ExportFormat } from '../api/trips';
 
 const store = useTripStore();
 // Default values are aligned with the backend demo endpoint for quick testing.
@@ -17,6 +18,8 @@ const form = reactive({
   budget_limit: 600,
   preferences: ['museum', 'food', 'landmark']
 });
+
+const selectedExportFormat = ref<ExportFormat>('html');
 
 const solution = computed(() => store.trip?.routing_solution);
 const preferencesText = computed({
@@ -122,12 +125,24 @@ function temperatureLabel(min: number | null, max: number | null): string {
       <button :disabled="store.loading || !store.trip" class="secondary" @click="store.insertPoi(1, libraryPoi)">
         Insert Library
       </button>
-      <button :disabled="store.loading || !solution" class="secondary" @click="store.exportCurrent()">
-        Export HTML
-      </button>
-      <button :disabled="store.loading || !solution" class="secondary" @click="store.exportCurrentFile()">
-        Export File
-      </button>
+      
+      <label>
+        Export Format
+        <select v-model="selectedExportFormat">
+          <option value="html">HTML Document</option>
+          <option value="pdf">PDF Report</option>
+          <option value="png">PNG Image</option>
+        </select>
+      </label>
+      <div class="inline-actions">
+        <button :disabled="store.loading || !solution" class="secondary" @click="store.exportCurrent(selectedExportFormat)">
+          Export Payload
+        </button>
+        <button :disabled="store.loading || !solution" class="secondary" @click="store.exportCurrentFile(selectedExportFormat)">
+          Export File
+        </button>
+      </div>
+
       <p v-if="store.error" class="error">{{ store.error }}</p>
       <p v-if="store.exportPayload" class="export-note">
         Export ready: {{ store.exportPayload.file_path ?? store.exportPayload.format }}

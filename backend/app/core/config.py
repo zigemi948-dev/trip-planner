@@ -57,6 +57,7 @@ class Settings(BaseModel):
     amap_mcp_matrix_tool: str = "amap_distance_matrix"
     matrix_cache_ttl_seconds: int = 3600
     job_store_path: str = "data/jobs.jsonl"
+    unsplash_access_key: str = ""
 
 
 def resolve_backend_path(path: str | Path) -> Path:
@@ -99,7 +100,7 @@ settings = Settings(
     llm_base_url=os.getenv("TRIP_LLM_BASE_URL", "https://api.openai.com/v1/chat/completions"),
     llm_model=os.getenv("TRIP_LLM_MODEL", "gpt-4o-mini"),
     llm_timeout_seconds=int(os.getenv("TRIP_LLM_TIMEOUT_SECONDS", "20")),
-    mcp_http_url=os.getenv("TRIP_MCP_HTTP_URL", ""),
+    mcp_http_url=os.getenv("TRIP_MCP_HTTP_URL", "https://mcp.amap.com/mcp?key=" + os.getenv("TRIP_AMAP_API_KEY", "")),
     mcp_timeout_seconds=int(os.getenv("TRIP_MCP_TIMEOUT_SECONDS", "20")),
     mcp_allow_inprocess=_bool_env("TRIP_MCP_ALLOW_INPROCESS", False),
     amap_mcp_poi_tool=os.getenv("TRIP_AMAP_MCP_POI_TOOL", "amap_poi_search"),
@@ -108,4 +109,5 @@ settings = Settings(
     amap_mcp_matrix_tool=os.getenv("TRIP_AMAP_MCP_MATRIX_TOOL", "amap_distance_matrix"),
     matrix_cache_ttl_seconds=int(os.getenv("TRIP_MATRIX_CACHE_TTL_SECONDS", "3600")),
     job_store_path=os.getenv("TRIP_JOB_STORE_PATH", "data/jobs.jsonl"),
+    unsplash_access_key=os.getenv("UNSPLASH_ACCESS_KEY", "")
 )

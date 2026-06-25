@@ -24,6 +24,8 @@ export interface PlanTripRequest {
   preferences: string[];
 }
 
+export type ExportFormat = 'html' | 'pdf' | 'png';
+
 export async function parseIntent(userQuery: string): Promise<IntentConstraints> {
   const response = await fetch(`${API_BASE}/trips/intent/parse`, {
     method: 'POST',
@@ -76,7 +78,7 @@ export async function replanTrip(payload: ReplanRequest): Promise<TripState> {
   return response.json();
 }
 
-export async function exportTrip(solution: RoutingSolution, exportFormat = 'html'): Promise<Record<string, string>> {
+export async function exportTrip(solution: RoutingSolution, exportFormat: ExportFormat = 'html'): Promise<Record<string, string>> {
   const response = await fetch(`${API_BASE}/trips/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -90,7 +92,7 @@ export async function exportTrip(solution: RoutingSolution, exportFormat = 'html
   return response.json();
 }
 
-export async function exportTripFile(solution: RoutingSolution, exportFormat = 'html'): Promise<Record<string, string>> {
+export async function exportTripFile(solution: RoutingSolution, exportFormat: ExportFormat = 'html'): Promise<Record<string, string>> {
   const response = await fetch(`${API_BASE}/trips/export/file`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
