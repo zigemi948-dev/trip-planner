@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import hypot
+from math import ceil, hypot
 
 from app.graph.state import BoundingBox, Coordinates, DayRoute, POICandidate
 
@@ -23,19 +23,59 @@ def interpolate_segment(origin: Coordinates, destination: Coordinates, steps: in
 
 
 def build_route_geometry(hotel: POICandidate, route: DayRoute) -> list[Coordinates]:
-    """Build a dense route geometry from hotel to every stop."""
+    """Build route geometry from provider polylines, with map-safe fallback segments."""
     if not route.stops:
         return [hotel.coordinates]
 
     geometry: list[Coordinates] = []
     previous = hotel.coordinates
     for stop in route.stops:
-        segment = interpolate_segment(previous, stop.poi.coordinates)
-        if geometry:
-            segment = segment[1:]
-        geometry.extend(segment)
+        geometry = _append_route_segment(geometry, previous, stop.poi.coordinates, stop.inbound_geometry)
         previous = stop.poi.coordinates
+    geometry = _append_segment(geometry, previous, hotel.coordinates)
     return geometry
+
+
+def _append_route_segment(
+    geometry: list[Coordinates],
+    origin: Coordinates,
+    destination: Coordinates,
+    provider_polyline: list[Coordinates],
+) -> list[Coordinates]:
+    if not provider_polyline:
+        return _append_segment(geometry, origin, destination)
+
+    next_geometry = geometry
+    segment = provider_polyline
+    if not next_geometry and origin == segment[0]:
+        next_geometry = [origin]
+    elif not next_geometry:
+        next_geometry = _append_segment(next_geometry, origin, segment[0])
+    elif next_geometry[-1] != segment[0]:
+        next_geometry = _append_segment(next_geometry, next_geometry[-1], segment[0])
+    if next_geometry and segment and next_geometry[-1] == segment[0]:
+        segment = segment[1:]
+    next_geometry = [*next_geometry, *segment]
+    if next_geometry[-1] != destination:
+        next_geometry = _append_segment(next_geometry, next_geometry[-1], destination)
+    return next_geometry
+
+
+def _append_segment(
+    geometry: list[Coordinates],
+    origin: Coordinates,
+    destination: Coordinates,
+) -> list[Coordinates]:
+    steps = _segment_steps(origin, destination)
+    segment = interpolate_segment(origin, destination, steps=steps)
+    if geometry:
+        segment = segment[1:]
+    return [*geometry, *segment]
+
+
+def _segment_steps(origin: Coordinates, destination: Coordinates) -> int:
+    coordinate_distance = hypot(destination.lat - origin.lat, destination.lng - origin.lng)
+    return max(3, min(18, ceil(coordinate_distance / 0.003)))
 
 
 def simplify_geometry(points: list[Coordinates], tolerance: float = 0.0004) -> list[Coordinates]:

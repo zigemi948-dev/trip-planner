@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import permutations
 from random import Random
+from typing import Callable
 
 from app.algorithms.clustering import cluster_by_day
 from app.algorithms.geometry import attach_route_geometry
@@ -26,6 +27,7 @@ NSGA_GENERATIONS = 14
 NSGA_MUTATION_RATE = 0.22
 TIME_PENALTY_WEIGHT = 1 / 600
 COST_PENALTY_WEIGHT = 1 / 500
+SolverProgressCallback = Callable[[int, int, float], None]
 
 
 @dataclass(frozen=True)
@@ -278,6 +280,7 @@ def _evaluate_sequence(
                 inbound_boarding_station=inbound.boarding_station if inbound else "",
                 inbound_alighting_station=inbound.alighting_station if inbound else "",
                 inbound_transit_note=inbound.transit_note if inbound else "",
+                inbound_geometry=inbound.polyline if inbound else [],
             )
         )
         total_cost += poi.fixed_cost + (inbound.cost if inbound else 0)
@@ -334,6 +337,8 @@ def _run_nsga2(
     day_start: str,
     day_end: str,
     constraints: list[WeatherConstraint],
+    day: int = 1,
+    progress_callback: SolverProgressCallback | None = None,
 ) -> list[NSGAIndividual]:
     """Run deterministic NSGA-II for one day-level TD-VRPTW cluster."""
     sequences = _candidate_sequences(hotel, cluster, matrix, day_start, constraints)
@@ -343,8 +348,9 @@ def _run_nsga2(
     rng = _rng_for_pois(cluster, f"{day_start}-{day_end}")
     population = _evaluate_population(hotel, sequences, matrix, day_start, day_end, constraints)
     population = _select_next_generation(population, NSGA_POPULATION_SIZE)
+    _emit_solver_progress(progress_callback, day, 0, population)
 
-    for _ in range(NSGA_GENERATIONS):
+    for generation in range(1, NSGA_GENERATIONS + 1):
         parents = _rank_population(population)
         offspring_sequences: list[list[POICandidate]] = []
         attempts = 0
@@ -358,8 +364,21 @@ def _run_nsga2(
             attempts += 1
         offspring = _evaluate_population(hotel, offspring_sequences, matrix, day_start, day_end, constraints)
         population = _select_next_generation([*population, *offspring], NSGA_POPULATION_SIZE)
+        _emit_solver_progress(progress_callback, day, generation, population)
 
     return _rank_population(population)
+
+
+def _emit_solver_progress(
+    progress_callback: SolverProgressCallback | None,
+    day: int,
+    epoch: int,
+    population: list[NSGAIndividual],
+) -> None:
+    if progress_callback is None or not population:
+        return
+    best = max(item.candidate.fitness_score for item in population)
+    progress_callback(day, epoch, round(best, 3))
 
 
 def _evaluate_population(
@@ -529,8 +548,18 @@ def _solve_day_route(
     day_start: str,
     day_end: str,
     constraints: list[WeatherConstraint],
+    progress_callback: SolverProgressCallback | None = None,
 ) -> DayRoute:
-    population = _run_nsga2(hotel, cluster, matrix, day_start, day_end, constraints)
+    population = _run_nsga2(
+        hotel,
+        cluster,
+        matrix,
+        day_start,
+        day_end,
+        constraints,
+        day=day,
+        progress_callback=progress_callback,
+    )
     if not population:
         route = DayRoute(day=day, stops=[], total_minutes=0, total_cost=0, fitness_score=0)
         return attach_route_geometry(hotel, route)
@@ -564,6 +593,8 @@ def solve_routes(
     day_start: str = "09:00",
     day_end: str | None = None,
     weather_constraints: list[WeatherConstraint] | None = None,
+    budget_limit: float | None = None,
+    progress_callback: SolverProgressCallback | None = None,
 ) -> list[DayRoute]:
     """Solve capacity-clustered TD-VRPTW routes with multi-objective search.
 
@@ -571,7 +602,10 @@ def solve_routes(
     compact deterministic population per day and chooses a Pareto-efficient
     route under time-window and weather constraints.
     """
-    clusters = cluster_by_day(pois, days)
+    daily_fixed_cost_budget = None
+    if budget_limit is not None and budget_limit > 0 and days > 0:
+        daily_fixed_cost_budget = budget_limit / days
+    clusters = cluster_by_day(pois, days, max_day_fixed_cost=daily_fixed_cost_budget)
     constraints = weather_constraints or []
     horizon = day_end or day_end_from_start(day_start)
     return [
@@ -583,6 +617,7 @@ def solve_routes(
             day_start=day_start,
             day_end=horizon,
             constraints=constraints,
+            progress_callback=progress_callback,
         )
         for day_index, cluster in enumerate(clusters, start=1)
     ]

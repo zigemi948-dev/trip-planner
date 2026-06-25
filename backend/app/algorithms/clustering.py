@@ -13,6 +13,7 @@ def cluster_by_day(
     pois: list[POICandidate],
     days: int,
     max_day_minutes: int | None = None,
+    max_day_fixed_cost: float | None = None,
 ) -> list[list[POICandidate]]:
     """Capacity-aware spatial clustering for the first heuristic phase.
 
@@ -31,7 +32,7 @@ def cluster_by_day(
     clusters: list[list[POICandidate]] = [[] for _ in range(days)]
 
     for _ in range(KMEANS_ITERATIONS):
-        clusters = _assign_with_capacity(ordered, centroids, limit)
+        clusters = _assign_with_capacity(ordered, centroids, limit, max_day_fixed_cost)
         centroids = _recompute_centroids(clusters, centroids)
 
     # Stable final ordering: high utility first inside each spatial day bucket.
@@ -54,9 +55,11 @@ def _assign_with_capacity(
     pois: list[POICandidate],
     centroids: list[tuple[float, float]],
     limit: int,
+    max_day_fixed_cost: float | None = None,
 ) -> list[list[POICandidate]]:
     clusters: list[list[POICandidate]] = [[] for _ in centroids]
     used_minutes = [0 for _ in centroids]
+    used_fixed_cost = [0.0 for _ in centroids]
 
     # Assign costly/high-value POIs first so the hard capacity has first claim
     # on the most important stops.
@@ -70,11 +73,17 @@ def _assign_with_capacity(
             index
             for index in range(len(centroids))
             if used_minutes[index] + demand <= limit
+            and _within_day_cost_budget(
+                used_fixed_cost[index],
+                poi.fixed_cost,
+                max_day_fixed_cost,
+            )
         ]
         candidate_days = feasible_days or list(range(len(centroids)))
         best_day = min(
             candidate_days,
             key=lambda index: (
+                _cost_overage(used_fixed_cost[index], poi.fixed_cost, max_day_fixed_cost),
                 _centroid_distance_km(poi, centroids[index]),
                 used_minutes[index],
                 len(clusters[index]),
@@ -82,6 +91,7 @@ def _assign_with_capacity(
         )
         clusters[best_day].append(poi)
         used_minutes[best_day] += demand
+        used_fixed_cost[best_day] += poi.fixed_cost
     return clusters
 
 
@@ -103,6 +113,26 @@ def _recompute_centroids(
 
 def _capacity_demand(poi: POICandidate) -> int:
     return poi.visit_duration_minutes + COMMUTE_PADDING_MINUTES
+
+
+def _within_day_cost_budget(
+    current_cost: float,
+    added_cost: float,
+    max_day_fixed_cost: float | None,
+) -> bool:
+    if max_day_fixed_cost is None or max_day_fixed_cost <= 0:
+        return True
+    return current_cost + added_cost <= max_day_fixed_cost
+
+
+def _cost_overage(
+    current_cost: float,
+    added_cost: float,
+    max_day_fixed_cost: float | None,
+) -> float:
+    if max_day_fixed_cost is None or max_day_fixed_cost <= 0:
+        return 0.0
+    return max(0.0, current_cost + added_cost - max_day_fixed_cost)
 
 
 def _centroid_distance_km(poi: POICandidate, centroid: tuple[float, float]) -> float:

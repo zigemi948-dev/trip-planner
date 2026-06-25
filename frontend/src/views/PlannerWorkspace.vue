@@ -50,9 +50,7 @@ const libraryPoi: POICandidate = {
 };
 
 onMounted(() => {
-  // Populate the first screen with a real solved state instead of an empty shell.
   store.checkBackend();
-  store.demo();
   store.refreshJobs();
 });
 
@@ -111,6 +109,9 @@ function temperatureLabel(min: number | null, max: number | null): string {
       </button>
       <button :disabled="store.loading" @click="store.plan(form)">
         {{ store.loading ? 'Solving...' : 'Plan Trip' }}
+      </button>
+      <button :disabled="store.loading" class="secondary" @click="store.demo()">
+        Load Demo
       </button>
       <button :disabled="store.loading" class="secondary" @click="store.streamPlan(form)">
         {{ store.streaming ? 'Streaming...' : 'Stream Solve' }}

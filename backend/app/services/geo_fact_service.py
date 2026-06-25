@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.agents.intent_agent import CITY_ALIASES, PREFERENCE_KEYWORDS
 from app.core.config import settings
@@ -81,6 +81,7 @@ class DirectionFact:
     boarding_station: str = ""
     alighting_station: str = ""
     note: str = ""
+    polyline: list[Coordinates] = field(default_factory=list)
 
 
 def amap_mcp_enabled() -> bool:
@@ -584,6 +585,7 @@ def _build_official_direction_matrix(
                     boarding_station=fact.boarding_station,
                     alighting_station=fact.alighting_station,
                     transit_note=fact.note,
+                    polyline=fact.polyline,
                 )
     return matrix
 
@@ -639,6 +641,7 @@ def _direction_fact_from_payload(payload: object, tool_name: str) -> DirectionFa
             distance_km=round(distance / 1000, 2),
             duration_minutes=max(1, round(duration / 60)),
             cost=cost,
+            polyline=_path_polyline(path),
         )
 
     transits = route.get("transits") if isinstance(route, dict) else None
@@ -659,6 +662,7 @@ def _direction_fact_from_payload(payload: object, tool_name: str) -> DirectionFa
             boarding_station=boarding,
             alighting_station=alighting,
             note=_transit_note(boarding, alighting),
+            polyline=_transit_polyline(transit),
         )
 
     distance = _optional_float(payload.get("distance"))
@@ -668,6 +672,7 @@ def _direction_fact_from_payload(payload: object, tool_name: str) -> DirectionFa
             distance_km=round(distance / 1000, 2),
             duration_minutes=max(1, round(duration / 60)),
             cost=_first_optional_float(payload.get("cost"), payload.get("taxi_cost")),
+            polyline=_polyline_coordinates(payload.get("polyline")),
         )
     return None
 
@@ -740,6 +745,77 @@ def _transit_stations(transit: dict) -> tuple[str, str]:
         boarding = boarding or str(departure.get("name") or "")
         alighting = str(arrival.get("name") or alighting)
     return boarding, alighting
+
+
+def _path_polyline(path: dict) -> list[Coordinates]:
+    points = _polyline_coordinates(path.get("polyline"))
+    steps = path.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict):
+                points.extend(_polyline_coordinates(step.get("polyline")))
+    return _dedupe_coordinates(points)
+
+
+def _transit_polyline(transit: dict) -> list[Coordinates]:
+    points: list[Coordinates] = []
+    segments = transit.get("segments") or []
+    if not isinstance(segments, list):
+        return points
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        walking = segment.get("walking") if isinstance(segment.get("walking"), dict) else {}
+        walking_steps = walking.get("steps") if isinstance(walking, dict) else []
+        if isinstance(walking_steps, list):
+            for step in walking_steps:
+                if isinstance(step, dict):
+                    points.extend(_polyline_coordinates(step.get("polyline")))
+        bus = segment.get("bus") if isinstance(segment.get("bus"), dict) else {}
+        buslines = bus.get("buslines") if isinstance(bus, dict) else []
+        if isinstance(buslines, list):
+            for line in buslines:
+                if isinstance(line, dict):
+                    points.extend(_polyline_coordinates(line.get("polyline")))
+    return _dedupe_coordinates(points)
+
+
+def _polyline_coordinates(value: object) -> list[Coordinates]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        points: list[Coordinates] = []
+        for item in value:
+            if isinstance(item, Coordinates):
+                points.append(item)
+            elif isinstance(item, dict):
+                lat = _optional_float(item.get("lat") or item.get("latitude"))
+                lng = _optional_float(item.get("lng") or item.get("lon") or item.get("longitude"))
+                if lat is not None and lng is not None:
+                    points.append(Coordinates(lat=lat, lng=lng))
+            elif isinstance(item, str):
+                points.extend(_polyline_coordinates(item))
+        return _dedupe_coordinates(points)
+
+    points = []
+    for raw_pair in str(value).split(";"):
+        pair = raw_pair.strip()
+        if not pair or "," not in pair:
+            continue
+        lng_text, lat_text = pair.split(",", 1)
+        lat = _optional_float(lat_text)
+        lng = _optional_float(lng_text)
+        if lat is not None and lng is not None:
+            points.append(Coordinates(lat=lat, lng=lng))
+    return _dedupe_coordinates(points)
+
+
+def _dedupe_coordinates(points: list[Coordinates]) -> list[Coordinates]:
+    deduped: list[Coordinates] = []
+    for point in points:
+        if not deduped or deduped[-1] != point:
+            deduped.append(point)
+    return deduped
 
 
 def _transit_note(boarding: str, alighting: str) -> str:

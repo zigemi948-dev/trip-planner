@@ -7,16 +7,18 @@ from app.agents.intent_agent import parse_trip_intent
 from app.algorithms.clustering import cluster_by_day
 from app.algorithms.matrix_builder import build_fallback_matrix, matrix_key
 from app.algorithms.matrix_builder import choose_mode
-from app.algorithms.geometry import simplify_geometry
+from app.algorithms.budget_pruner import remove_budget_candidate
+from app.algorithms.geometry import build_route_geometry, simplify_geometry
 from app.algorithms.geo import haversine_km
 from app.algorithms.vrp_solver import solve_routes
 from app.algorithms import vrp_solver
 from app.core.config import BACKEND_ROOT, resolve_backend_path
-from app.graph.state import Coordinates, ExportRequest, FinancialContext, IntentConstraints, MatrixEdge, POICandidate, ReplanRequest, TransportMode, TripState
+from app.graph.state import Coordinates, DayRoute, ExportRequest, FinancialContext, IntentConstraints, MatrixEdge, POICandidate, ReplanRequest, RouteStop, TransportMode, TripState
 from app.graph import nodes as workflow_nodes
 from app.services import provider_adapters
 from app.services.amap_service import AmapUnavailableError, _poi_from_amap
 from app.services.geo_fact_service import (
+    _direction_fact_from_payload,
     _official_keyword_queries,
     build_time_dependent_matrix_facts,
     normalize_amap_city,
@@ -126,6 +128,39 @@ def test_capacity_clustering_respects_daily_visit_and_commute_demand():
 
     assert len(clusters) == 2
     assert all(sum(poi.visit_duration_minutes + 30 for poi in cluster) <= 180 for cluster in clusters)
+
+
+def test_clustering_spreads_fixed_cost_pressure_across_days():
+    pois = [
+        POICandidate(
+            id=f"expensive_{index}",
+            name=f"Expensive {index}",
+            category="museum",
+            coordinates=Coordinates(lat=31.20 + index * 0.001, lng=121.40 + index * 0.001),
+            fixed_cost=100,
+            visit_duration_minutes=45,
+            utility=8,
+        )
+        for index in range(2)
+    ]
+    pois.extend(
+        [
+            POICandidate(
+                id=f"free_{index}",
+                name=f"Free {index}",
+                category="garden",
+                coordinates=Coordinates(lat=31.21 + index * 0.001, lng=121.41 + index * 0.001),
+                fixed_cost=0,
+                visit_duration_minutes=45,
+                utility=6,
+            )
+            for index in range(2)
+        ]
+    )
+
+    clusters = cluster_by_day(pois, days=2, max_day_minutes=240, max_day_fixed_cost=100)
+
+    assert [sum(poi.fixed_cost for poi in cluster) for cluster in clusters] == [100, 100]
 
 
 def test_td_vrptw_solver_waits_for_opening_and_skips_day_end_violations():
@@ -647,6 +682,9 @@ def test_workflow_returns_rendered_solution():
     assert "Hotel:" in state.routing_solution.narrative
     assert "Daily cost:" in state.routing_solution.narrative
     assert any(event["event"] == "provider_status" for event in state.graph_controls.events)
+    solver_events = [event for event in state.graph_controls.events if event["event"] == "solver_epoch"]
+    assert len(solver_events) > state.intent_constraints.days
+    assert {"day", "epoch", "fitness", "algorithm"} <= set(solver_events[0]["payload"])
     matrix_events = [event for event in state.graph_controls.events if event["event"] == "matrix_ready"]
     assert matrix_events
     assert matrix_events[-1]["payload"]["source"] in {
@@ -808,6 +846,32 @@ def test_budget_repair_prunes_when_budget_is_tight():
     )
 
 
+def test_budget_repair_prefers_cheaper_same_category_replacement():
+    expensive = POICandidate(
+        id="expensive_gallery",
+        name="Expensive Gallery",
+        category="gallery",
+        coordinates=Coordinates(lat=31.23, lng=121.47),
+        fixed_cost=180,
+        utility=4,
+    )
+    cheaper = POICandidate(
+        id="cheap_gallery",
+        name="Community Gallery",
+        category="gallery",
+        coordinates=Coordinates(lat=31.231, lng=121.471),
+        fixed_cost=20,
+        utility=6,
+    )
+
+    repaired, action = remove_budget_candidate([expensive, cheaper])
+
+    assert action is not None
+    assert action.removed_poi_id == "expensive_gallery"
+    assert action.replacement_poi_id == "cheap_gallery"
+    assert [poi.id for poi in repaired] == ["cheap_gallery"]
+
+
 def test_budget_repair_can_prune_more_than_three_candidates(monkeypatch: pytest.MonkeyPatch):
     class ExpensiveAttractions:
         def search(self, intent: IntentConstraints) -> list[POICandidate]:
@@ -930,6 +994,102 @@ def test_douglas_peucker_simplifies_route_geometry():
     assert simplified[0] == points[0]
     assert simplified[-1] == points[-1]
     assert len(simplified) < len(points)
+
+
+def test_route_geometry_returns_to_hotel():
+    hotel = POICandidate(
+        id="hotel",
+        name="Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.23, lng=121.47),
+    )
+    poi = POICandidate(
+        id="poi",
+        name="POI",
+        category="museum",
+        coordinates=Coordinates(lat=31.24, lng=121.48),
+    )
+    route = DayRoute(
+        day=1,
+        stops=[
+            RouteStop(
+                poi=poi,
+                day=1,
+                arrival_time="09:15",
+                departure_time="10:15",
+            )
+        ],
+        total_minutes=75,
+        total_cost=0,
+        fitness_score=1,
+    )
+
+    geometry = build_route_geometry(hotel, route)
+
+    assert geometry[0] == hotel.coordinates
+    assert geometry[-1] == hotel.coordinates
+    assert poi.coordinates in geometry
+
+
+def test_route_geometry_prefers_provider_polyline():
+    hotel = POICandidate(
+        id="hotel",
+        name="Hotel",
+        category="hotel",
+        coordinates=Coordinates(lat=31.23, lng=121.47),
+    )
+    poi = POICandidate(
+        id="poi",
+        name="POI",
+        category="museum",
+        coordinates=Coordinates(lat=31.24, lng=121.48),
+    )
+    bend = Coordinates(lat=31.235, lng=121.485)
+    route = DayRoute(
+        day=1,
+        stops=[
+            RouteStop(
+                poi=poi,
+                day=1,
+                arrival_time="09:15",
+                departure_time="10:15",
+                inbound_geometry=[hotel.coordinates, bend, poi.coordinates],
+            )
+        ],
+        total_minutes=75,
+        total_cost=0,
+        fitness_score=1,
+    )
+
+    geometry = build_route_geometry(hotel, route)
+
+    assert bend in geometry
+    assert geometry[0] == hotel.coordinates
+    assert geometry[-1] == hotel.coordinates
+
+
+def test_direction_fact_parses_provider_polyline():
+    payload = {
+        "route": {
+            "paths": [
+                {
+                    "distance": "1200",
+                    "duration": "600",
+                    "steps": [
+                        {"polyline": "121.470000,31.230000;121.480000,31.240000"},
+                    ],
+                }
+            ]
+        }
+    }
+
+    fact = _direction_fact_from_payload(payload, "maps_direction_driving")
+
+    assert fact is not None
+    assert fact.polyline == [
+        Coordinates(lat=31.23, lng=121.47),
+        Coordinates(lat=31.24, lng=121.48),
+    ]
 
 
 def test_health_endpoint_when_fastapi_is_available():

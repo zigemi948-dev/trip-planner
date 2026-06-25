@@ -198,6 +198,7 @@ class MatrixEdge(BaseModel):
     boarding_station: str = ""
     alighting_station: str = ""
     transit_note: str = ""
+    polyline: list[Coordinates] = Field(default_factory=list)
 
 
 class SpatialGraphData(BaseModel):
@@ -223,6 +224,7 @@ class RouteStop(BaseModel):
     inbound_boarding_station: str = ""
     inbound_alighting_station: str = ""
     inbound_transit_note: str = ""
+    inbound_geometry: list[Coordinates] = Field(default_factory=list)
 
 
 class DayCostBreakdown(BaseModel):
@@ -267,6 +269,8 @@ class BudgetRepairAction(BaseModel):
     removed_poi_id: str
     removed_poi_name: str
     reason: str
+    replacement_poi_id: str = ""
+    replacement_poi_name: str = ""
 
 
 class FitnessPoint(BaseModel):

@@ -131,9 +131,9 @@ def _solution_to_html(solution: RoutingSolution) -> str:
 
 def _temperature_text(low: float | None, high: float | None) -> str:
     if low is not None and high is not None:
-        return f"{low:.0f}-{high:.0f} C"
+        return f"{low:.0f}-{high:.0f} °C"
     if high is not None:
-        return f"{high:.0f} C"
+        return f"{high:.0f} °C"
     if low is not None:
-        return f"{low:.0f} C"
+        return f"{low:.0f} °C"
     return ""

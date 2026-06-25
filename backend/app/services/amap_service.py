@@ -139,7 +139,7 @@ def fetch_weather_constraints(city: str) -> list[WeatherConstraint]:
 
 
 def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) -> dict[str, MatrixEdge]:
-    """Build directed travel edges from Amap distance data with fallback shape."""
+    """Build directed travel edges from Amap direction data with distance fallback."""
     if not amap_is_enabled():
         raise AmapUnavailableError("Amap provider is not enabled")
 
@@ -155,9 +155,9 @@ def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) ->
             distances = {}
         for destination in destinations:
             fallback_edge = fallback[matrix_key(origin.id, destination.id, 9)]
-            meters, seconds, api_cost = distances.get(
+            meters, seconds, api_cost, api_polyline = distances.get(
                 destination.id,
-                (fallback_edge.distance_km * 1000, fallback_edge.duration_minutes * 60, None),
+                (fallback_edge.distance_km * 1000, fallback_edge.duration_minutes * 60, None, []),
             )
             distance_km = round(float(meters) / 1000, 2)
             base_minutes = max(1, round(float(seconds) / 60))
@@ -187,6 +187,7 @@ def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) ->
                     boarding_station=boarding_station,
                     alighting_station=alighting_station,
                     transit_note=transit_note,
+                    polyline=api_polyline,
                 )
 
     if not matrix:
@@ -291,9 +292,12 @@ def _distance_rows(origin: POICandidate, destinations: list[POICandidate]) -> di
     return rows
 
 
-def _direction_rows(origin: POICandidate, destinations: list[POICandidate]) -> dict[str, tuple[float, float, float | None]]:
+def _direction_rows(
+    origin: POICandidate,
+    destinations: list[POICandidate],
+) -> dict[str, tuple[float, float, float | None, list[Coordinates]]]:
     """Prefer Amap direction prices; fall back to the bulk distance API for missing legs."""
-    rows: dict[str, tuple[float, float, float | None]] = {}
+    rows: dict[str, tuple[float, float, float | None, list[Coordinates]]] = {}
     for destination in destinations:
         try:
             payload = _request_json(
@@ -301,7 +305,7 @@ def _direction_rows(origin: POICandidate, destinations: list[POICandidate]) -> d
                 {
                     "origin": f"{origin.coordinates.lng},{origin.coordinates.lat}",
                     "destination": f"{destination.coordinates.lng},{destination.coordinates.lat}",
-                    "extensions": "base",
+                    "extensions": "all",
                 },
             )
             route = payload.get("route") or {}
@@ -311,13 +315,13 @@ def _direction_rows(origin: POICandidate, destinations: list[POICandidate]) -> d
             duration = float(path.get("duration") or 0)
             cost = _first_optional_float(route.get("taxi_cost"), path.get("taxi_cost"), path.get("cost"), path.get("tolls"))
             if distance > 0 and duration > 0:
-                rows[destination.id] = (distance, duration, cost)
+                rows[destination.id] = (distance, duration, cost, _path_polyline(path))
         except AmapUnavailableError:
             continue
     missing = [destination for destination in destinations if destination.id not in rows]
     if missing:
         for destination_id, (distance, duration) in _distance_rows(origin, missing).items():
-            rows[destination_id] = (distance, duration, None)
+            rows[destination_id] = (distance, duration, None, [])
     return rows
 
 
@@ -422,3 +426,51 @@ def _first_optional_float(*values: object) -> float | None:
         if parsed is not None:
             return parsed
     return None
+
+
+def _path_polyline(path: dict) -> list[Coordinates]:
+    points = _polyline_coordinates(path.get("polyline"))
+    steps = path.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict):
+                points.extend(_polyline_coordinates(step.get("polyline")))
+    return _dedupe_coordinates(points)
+
+
+def _polyline_coordinates(value: object) -> list[Coordinates]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        points: list[Coordinates] = []
+        for item in value:
+            if isinstance(item, Coordinates):
+                points.append(item)
+            elif isinstance(item, dict):
+                lat = _optional_float(item.get("lat") or item.get("latitude"))
+                lng = _optional_float(item.get("lng") or item.get("lon") or item.get("longitude"))
+                if lat is not None and lng is not None:
+                    points.append(Coordinates(lat=lat, lng=lng))
+            elif isinstance(item, str):
+                points.extend(_polyline_coordinates(item))
+        return _dedupe_coordinates(points)
+
+    points = []
+    for raw_pair in str(value).split(";"):
+        pair = raw_pair.strip()
+        if not pair or "," not in pair:
+            continue
+        lng_text, lat_text = pair.split(",", 1)
+        lat = _optional_float(lat_text)
+        lng = _optional_float(lng_text)
+        if lat is not None and lng is not None:
+            points.append(Coordinates(lat=lat, lng=lng))
+    return _dedupe_coordinates(points)
+
+
+def _dedupe_coordinates(points: list[Coordinates]) -> list[Coordinates]:
+    deduped: list[Coordinates] = []
+    for point in points:
+        if not deduped or deduped[-1] != point:
+            deduped.append(point)
+    return deduped

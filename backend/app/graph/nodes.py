@@ -104,6 +104,18 @@ def vrp_solver_node(state: TripState) -> TripState:
     hotel = state.spatial_graph_data.hotel_anchor
     if hotel is None:
         raise ValueError("hotel anchor is required before solving")
+
+    def emit_solver_progress(day: int, epoch: int, fitness: float) -> None:
+        state.emit(
+            "solver_epoch",
+            {
+                "day": day,
+                "epoch": epoch,
+                "fitness": fitness,
+                "algorithm": "NSGA-II",
+            },
+        )
+
     routes = solve_routes(
         hotel=hotel,
         pois=state.spatial_graph_data.poi_candidates,
@@ -112,11 +124,11 @@ def vrp_solver_node(state: TripState) -> TripState:
         day_start=state.intent_constraints.time_window_baseline[0],
         day_end=state.intent_constraints.time_window_baseline[1],
         weather_constraints=state.spatial_graph_data.weather_constraints,
+        budget_limit=state.intent_constraints.budget_limit,
+        progress_callback=emit_solver_progress,
     )
     state.routing_solution.optimized_route = routes
     state.graph_controls.current_status = GraphStatus.solved
-    for route in routes:
-        state.emit("solver_epoch", {"day": route.day, "fitness": route.fitness_score, "algorithm": "NSGA-II"})
     state.routing_solution.fitness_curve = build_fitness_curve(routes)
     return state
 
