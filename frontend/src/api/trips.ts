@@ -78,11 +78,20 @@ export async function replanTrip(payload: ReplanRequest): Promise<TripState> {
   return response.json();
 }
 
-export async function exportTrip(solution: RoutingSolution, exportFormat: ExportFormat = 'html'): Promise<Record<string, string>> {
+// 修改 exportTrip 方法
+export async function exportTrip(
+  solution: RoutingSolution, 
+  exportFormat: ExportFormat = 'html',
+  mapSnapshotBase64?: string | null // 新增参数
+): Promise<Record<string, string>> {
   const response = await fetch(`${API_BASE}/trips/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ solution, export_format: exportFormat })
+    body: JSON.stringify({ 
+      solution, 
+      export_format: exportFormat,
+      map_snapshot_base64: mapSnapshotBase64 // 注入 Payload
+    })
   });
 
   if (!response.ok) {
@@ -92,11 +101,20 @@ export async function exportTrip(solution: RoutingSolution, exportFormat: Export
   return response.json();
 }
 
-export async function exportTripFile(solution: RoutingSolution, exportFormat: ExportFormat = 'html'): Promise<Record<string, string>> {
+// 修改 exportTripFile 方法
+export async function exportTripFile(
+  solution: RoutingSolution, 
+  exportFormat: ExportFormat = 'html',
+  mapSnapshotBase64?: string | null // 新增参数
+): Promise<Record<string, string>> {
   const response = await fetch(`${API_BASE}/trips/export/file`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ solution, export_format: exportFormat })
+    body: JSON.stringify({ 
+      solution, 
+      export_format: exportFormat,
+      map_snapshot_base64: mapSnapshotBase64 // 注入 Payload
+    })
   });
 
   if (!response.ok) {

@@ -370,6 +370,7 @@ class ExportRequest(BaseModel):
 
     solution: RoutingSolution
     export_format: str = Field(default="html", pattern="^(html|pdf|png)$")
+    map_snapshot_base64: str | None = None
 
 
 class JobStatus(TextEnum):

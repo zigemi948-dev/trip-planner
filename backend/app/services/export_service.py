@@ -9,13 +9,18 @@ from app.core.config import resolve_backend_path
 from app.graph.state import Coordinates, RoutingSolution
 
 
-def render_export_payload(solution: RoutingSolution, export_format: str = "html") -> dict[str, str]:
+def render_export_payload(
+    solution: RoutingSolution, 
+    export_format: str = "html",
+    map_snapshot_base64: str | None = None
+) -> dict[str, str]:
     """Render a deterministic, self-contained export payload.
 
     The HTML is intentionally local-only: charts and route maps are embedded as
     SVG data URIs so tests and offline demos never depend on external image APIs.
     """
-    html = _solution_to_html(solution)
+    # 注入快照参数
+    html = _solution_to_html(solution, map_snapshot_base64)
     return {
         "format": export_format,
         "content_type": {
@@ -31,9 +36,11 @@ def persist_export_payload(
     solution: RoutingSolution,
     export_format: str = "html",
     output_dir: str | Path = "exports",
+    map_snapshot_base64: str | None = None
 ) -> dict[str, str]:
     """Write an export artifact to disk and return metadata for the UI."""
-    payload = render_export_payload(solution, export_format)
+    # 注入快照参数
+    payload = render_export_payload(solution, export_format, map_snapshot_base64)
     directory = resolve_backend_path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -65,21 +72,39 @@ def _write_pdf(html: str, output_path: Path) -> None:
 
 def _write_png(html: str, output_path: Path) -> None:
     try:
-        from weasyprint import HTML as WeasyHTML
+        from playwright.sync_api import sync_playwright
 
-        document = WeasyHTML(string=html).render()
-        page = document.pages[0]
-        if hasattr(page, "write_png"):
-            page.write_png(output_path)
+        with sync_playwright() as p:
+            # 启动无头 Chromium
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            
+            # 设置一个适合旅行路线展示的基础视口宽度，高度会由于 full_page=True 自动延展
+            page.set_viewport_size({"width": 960, "height": 1080})
+            
+            # 注入 HTML 。由于图片和图表已转为 data URI，此处渲染无需额外网络请求
+            page.set_content(html, wait_until="networkidle")
+            
+            # 截取全页面长图，确保多天的行程均被保存
+            page.screenshot(path=output_path, full_page=True)
+            
+            browser.close()
             return
+    except ImportError:
+        # 如果所在环境（如 CI/CD）未安装 playwright，静默回退到占位图，避免阻断核心流程
+        pass
     except Exception:
         pass
+    
+    # 异常或降级情况下的占位图兜底
     output_path.write_bytes(_placeholder_png_bytes())
 
 
-def _solution_to_html(solution: RoutingSolution) -> str:
+def _solution_to_html(solution: RoutingSolution, map_snapshot_base64: str | None = None) -> str:
     chart_img_tag = _image_tag(_budget_chart_data_uri(solution), "Budget Chart", "budget-chart")
-    map_img_tag = _image_tag(_route_map_data_uri(solution), "Route Map", "route-map")
+    # 核心策略：如果存在前端传来的快照，直接复用（自带 data:image 协议头）；否则降级到后端纯计算的矢量 SVG
+    map_data_uri = map_snapshot_base64 if map_snapshot_base64 else _route_map_data_uri(solution)
+    map_img_tag = _image_tag(map_data_uri, "Route Map", "route-map")
     daily_summary_html = _daily_summary_html(solution)
 
     route_rows = "".join(
@@ -131,7 +156,8 @@ def _solution_to_html(solution: RoutingSolution) -> str:
     .budget {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }}
     .budget div {{ background: #f6f8fb; border-radius: 8px; padding: 12px; text-align: center; border: 1px solid #e1e8f0; }}
     .visual-grid {{ display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(220px, 0.75fr); gap: 18px; align-items: start; }}
-    .route-map, .budget-chart {{ width: 100%; border-radius: 8px; border: 1px solid #d9e0ea; }}
+    .route-map, .budget-chart {{ width: 100%; max-width: 100%; border-radius: 8px; border: 1px solid #d9e0ea; }}
+    .route-map {{ object-fit: cover; aspect-ratio: 16/9; }}
     .summary-box {{ background: #f6f8fb; border-radius: 8px; padding: 12px 16px; }}
   </style>
 </head>

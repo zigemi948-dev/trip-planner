@@ -53,7 +53,7 @@ def export_trip(request: ExportRequest) -> dict[str, str]:
             status_code=422, 
             detail=f"Unsupported export format '{request.export_format}'. Permitted values: {', '.join(valid_formats)}"
         )
-    return render_export_payload(request.solution, request.export_format)
+    return render_export_payload(request.solution, request.export_format, request.map_snapshot_base64)
 
 
 @router.post("/trips/export/file")
@@ -65,7 +65,7 @@ def export_trip_file(request: ExportRequest) -> dict[str, str]:
             status_code=422, 
             detail=f"Unsupported export format '{request.export_format}'. Permitted values: {', '.join(valid_formats)}"
         )
-    return persist_export_payload(request.solution, request.export_format)
+    return persist_export_payload(request.solution, request.export_format, map_snapshot_base64=request.map_snapshot_base64)
 
 
 @router.post("/trips/jobs", response_model=PlanningJob)

@@ -235,19 +235,28 @@ def _search_configured_amap_pois_balanced(city: str, keywords: list[str], limit:
     per_keyword_limit = max(1, (limit + max(len(keywords), 1) - 1) // max(len(keywords), 1))
     for keyword in _unique_keywords(keywords):
         keyword_terms = _amap_keyword_queries([keyword])
-        payload = call_tool(
-            settings.amap_mcp_poi_tool,
-            {
-                "city": normalized_city,
-                "keywords": keyword_terms,
-                "limit": per_keyword_limit,
-            },
-        )
-        for poi in _coerce_poi_candidates(payload, fallback_category=keyword)[:per_keyword_limit]:
-            if poi.id in seen:
-                continue
-            seen.add(poi.id)
-            candidates.append(poi)
+        # Send only a limited subset of keyword terms per round to avoid hitting
+        # the Amap free-tier QPS cap (~5 queries/second). Stop as soon as we
+        # have enough candidates.
+        term_limit = max(1, min(len(keyword_terms), per_keyword_limit + 1))
+        for term in keyword_terms[:term_limit]:
+            payload = call_tool(
+                settings.amap_mcp_poi_tool,
+                {
+                    "city": normalized_city,
+                    "keywords": [term],
+                    "limit": per_keyword_limit,
+                },
+            )
+            for poi in _coerce_poi_candidates(payload, fallback_category=keyword)[:per_keyword_limit]:
+                if poi.id in seen:
+                    continue
+                seen.add(poi.id)
+                candidates.append(poi)
+            if len(candidates) >= limit:
+                break
+        if len(candidates) >= limit:
+            break
 
     if len(candidates) < limit:
         payload = call_tool(

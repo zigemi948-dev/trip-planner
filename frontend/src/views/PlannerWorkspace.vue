@@ -20,6 +20,7 @@ const form = reactive({
 });
 
 const selectedExportFormat = ref<ExportFormat>('html');
+const mapViewerRef = ref<InstanceType<typeof MapViewer> | null>(null); // 新增：用于绑定 MapViewer 组件实例
 
 const solution = computed(() => store.trip?.routing_solution);
 const preferencesText = computed({
@@ -81,6 +82,25 @@ function temperatureLabel(min: number | null, max: number | null): string {
   }
   return 'Temp unavailable';
 }
+
+// 新增：统一的导出处理函数
+async function handleExport(isFile: boolean) {
+  if (!solution.value) return;
+  
+  // 1. 触发地图快照提取（这一步会等待 html2canvas 渲染）
+  let snapshotBase64: string | null = null;
+  if (mapViewerRef.value) {
+    snapshotBase64 = await mapViewerRef.value.exportMapSnapshot();
+  }
+
+  // 2. 将快照连同格式要求发送给 Store 处理
+  if (isFile) {
+    await store.exportCurrentFile(selectedExportFormat.value, snapshotBase64);
+  } else {
+    await store.exportCurrent(selectedExportFormat.value, snapshotBase64);
+  }
+}
+
 </script>
 
 <template>
@@ -135,10 +155,18 @@ function temperatureLabel(min: number | null, max: number | null): string {
         </select>
       </label>
       <div class="inline-actions">
-        <button :disabled="store.loading || !solution" class="secondary" @click="store.exportCurrent(selectedExportFormat)">
+        <button 
+          :disabled="store.loading || !solution" 
+          class="secondary" 
+          @click="handleExport(false)" 
+        >
           Export Payload
         </button>
-        <button :disabled="store.loading || !solution" class="secondary" @click="store.exportCurrentFile(selectedExportFormat)">
+        <button 
+          :disabled="store.loading || !solution" 
+          class="secondary" 
+          @click="handleExport(true)" 
+        >
           Export File
         </button>
       </div>
@@ -185,7 +213,11 @@ function temperatureLabel(min: number | null, max: number | null): string {
     </aside>
 
     <section class="main-stage">
-      <MapViewer :routes="solution?.optimized_route ?? []" :hotel="solution?.hotel_anchor ?? null" />
+  <MapViewer 
+    ref="mapViewerRef" 
+    :routes="solution?.optimized_route ?? []" 
+    :hotel="solution?.hotel_anchor ?? null" 
+  />
       <div class="lower-grid">
         <RouteEditor :routes="solution?.optimized_route ?? []" />
         <BudgetDashboard

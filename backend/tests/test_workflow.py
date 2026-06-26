@@ -941,6 +941,10 @@ def test_budget_repair_prefers_cheaper_same_category_replacement():
     assert action.removed_poi_id == "expensive_gallery"
     assert action.replacement_poi_id == "cheap_gallery"
     assert [poi.id for poi in repaired] == ["cheap_gallery"]
+    # 确保 pruner 确实去掉了昂贵的选项，而不是因为恰好 expensive 是第一个
+    assert expensive not in repaired
+    assert cheaper in repaired
+    assert len(repaired) < 2
 
 
 def test_budget_repair_can_prune_more_than_three_candidates(monkeypatch: pytest.MonkeyPatch):
@@ -1084,9 +1088,11 @@ def test_export_payload_can_be_persisted():
     payload = persist_export_payload(state.routing_solution, output_dir=output_dir)
     output_path = Path(payload["file_path"])
 
-    assert payload["file_path"].endswith(".html")
-    assert "Trip Plan" in output_path.read_text(encoding="utf-8")
-    output_path.unlink(missing_ok=True)
+    try:
+        assert payload["file_path"].endswith(".html")
+        assert "Trip Plan" in output_path.read_text(encoding="utf-8")
+    finally:
+        output_path.unlink(missing_ok=True)
 
 
 def test_pdf_and_png_exports_can_be_persisted_without_external_fetches():
@@ -1100,14 +1106,16 @@ def test_pdf_and_png_exports_can_be_persisted_without_external_fetches():
     pdf_path = Path(pdf_payload["file_path"])
     png_path = Path(png_payload["file_path"])
 
-    assert pdf_payload["content_type"] == "application/pdf"
-    assert png_payload["content_type"] == "image/png"
-    assert pdf_path.suffix == ".pdf"
-    assert png_path.suffix == ".png"
-    assert pdf_path.stat().st_size > 0
-    assert png_path.stat().st_size > 0
-    pdf_path.unlink(missing_ok=True)
-    png_path.unlink(missing_ok=True)
+    try:
+        assert pdf_payload["content_type"] == "application/pdf"
+        assert png_payload["content_type"] == "image/png"
+        assert pdf_path.suffix == ".pdf"
+        assert png_path.suffix == ".png"
+        assert pdf_path.stat().st_size > 0
+        assert png_path.stat().st_size > 0
+    finally:
+        pdf_path.unlink(missing_ok=True)
+        png_path.unlink(missing_ok=True)
 
 
 def test_douglas_peucker_simplifies_route_geometry():

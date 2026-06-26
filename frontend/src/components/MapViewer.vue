@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import html2canvas from 'html2canvas';
 import type { Coordinates, DayRoute, POICandidate, RouteStop } from '../types/trip';
 
 type AMapLngLat = [number, number];
@@ -42,6 +43,7 @@ type AMapNamespace = {
       resizeEnable?: boolean;
       viewMode?: '2D' | '3D';
       zoom: number;
+      WebGLParams?: { preserveDrawingBuffer: boolean }; // 新增：声明 WebGL 参数类型
     }
   ) => AMapMap;
   Marker: new (options: {
@@ -133,7 +135,8 @@ async function initializeMap() {
       mapStyle: 'amap://styles/normal',
       resizeEnable: true,
       viewMode: '2D',
-      zoom: 12
+      zoom: 12,
+      WebGLParams: { preserveDrawingBuffer: true } // 新增：保留绘制缓冲区以支持跨域截图
     });
     map = currentMap;
     infoWindow = new amap.InfoWindow({
@@ -399,6 +402,31 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 }
+
+// 新增：地图快照提取核心逻辑
+async function exportMapSnapshot(): Promise<string | null> {
+  if (!mapContainer.value) {
+    return null;
+  }
+  try {
+    // 调用 html2canvas 对 DOM 树及内部包含的 WebGL Canvas 进行重绘合成
+    const canvas = await html2canvas(mapContainer.value, {
+      useCORS: true, // 允许加载跨域的地图瓦片资源
+      allowTaint: false,
+      backgroundColor: null // 保持原有背景
+    });
+    return canvas.toDataURL('image/png');
+  } catch (error) {
+    console.error('地图快照生成失败:', error);
+    return null;
+  }
+}
+
+// 新增：向父组件暴露接口
+defineExpose({
+  exportMapSnapshot
+});
+
 </script>
 
 <template>

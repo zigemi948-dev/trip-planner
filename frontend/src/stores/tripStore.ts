@@ -156,14 +156,14 @@ export const useTripStore = defineStore('trip', {
       }
     },
 
-    async exportCurrent(format: ExportFormat = 'html') {
+    async exportCurrent(format: ExportFormat = 'html', mapSnapshot?: string | null) {
       if (!this.trip) {
         return;
       }
       this.loading = true;
       this.error = '';
       try {
-        this.exportPayload = await exportTrip(this.trip.routing_solution, format);
+        this.exportPayload = await exportTrip(this.trip.routing_solution, format, mapSnapshot);
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
@@ -171,14 +171,14 @@ export const useTripStore = defineStore('trip', {
       }
     },
 
-    async exportCurrentFile(format: ExportFormat = 'html') {
+    async exportCurrentFile(format: ExportFormat = 'html', mapSnapshot?: string | null) {
       if (!this.trip) {
         return;
       }
       this.loading = true;
       this.error = '';
       try {
-        this.exportPayload = await exportTripFile(this.trip.routing_solution, format);
+        this.exportPayload = await exportTripFile(this.trip.routing_solution, format, mapSnapshot);
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
