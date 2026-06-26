@@ -48,6 +48,8 @@ class Settings(BaseModel):
     llm_base_url: str = "https://api.openai.com/v1/chat/completions"
     llm_model: str = "gpt-4o-mini"
     llm_timeout_seconds: int = 20
+    ssl_verify: bool = True
+    ssl_ca_file: str = ""
     mcp_http_url: str = ""
     mcp_timeout_seconds: int = 20
     mcp_allow_inprocess: bool = False
@@ -100,7 +102,9 @@ settings = Settings(
     llm_base_url=os.getenv("TRIP_LLM_BASE_URL", "https://api.openai.com/v1/chat/completions"),
     llm_model=os.getenv("TRIP_LLM_MODEL", "gpt-4o-mini"),
     llm_timeout_seconds=int(os.getenv("TRIP_LLM_TIMEOUT_SECONDS", "20")),
-    mcp_http_url=os.getenv("TRIP_MCP_HTTP_URL", "https://mcp.amap.com/mcp?key=" + os.getenv("TRIP_AMAP_API_KEY", "")),
+    ssl_verify=_bool_env("TRIP_SSL_VERIFY", True),
+    ssl_ca_file=os.getenv("TRIP_SSL_CA_FILE", ""),
+    mcp_http_url=os.getenv("TRIP_MCP_HTTP_URL", ""),
     mcp_timeout_seconds=int(os.getenv("TRIP_MCP_TIMEOUT_SECONDS", "20")),
     mcp_allow_inprocess=_bool_env("TRIP_MCP_ALLOW_INPROCESS", False),
     amap_mcp_poi_tool=os.getenv("TRIP_AMAP_MCP_POI_TOOL", "amap_poi_search"),

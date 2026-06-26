@@ -883,6 +883,21 @@ def test_export_payload_uses_requested_format():
     assert "Day 1" in payload["content"]
 
 
+def test_export_payload_embeds_local_map_chart_and_summary():
+    state = run_trip_workflow(
+        IntentConstraints(user_query="demo", destination="Shanghai", days=1, budget_limit=800)
+    )
+
+    payload = render_export_payload(state.routing_solution, "html")
+
+    assert "Route Map &amp; Summary" not in payload["content"]
+    assert "Route Map & Summary" in payload["content"]
+    assert "Daily Flow" in payload["content"]
+    assert "Budget Chart" in payload["content"]
+    assert "data:image/svg+xml;base64," in payload["content"]
+    assert "https://api.unsplash.com" not in payload["content"]
+
+
 def test_budget_repair_prunes_when_budget_is_tight():
     state = run_trip_workflow(
         IntentConstraints(
@@ -1072,6 +1087,27 @@ def test_export_payload_can_be_persisted():
     assert payload["file_path"].endswith(".html")
     assert "Trip Plan" in output_path.read_text(encoding="utf-8")
     output_path.unlink(missing_ok=True)
+
+
+def test_pdf_and_png_exports_can_be_persisted_without_external_fetches():
+    state = run_trip_workflow(
+        IntentConstraints(user_query="demo", destination="Shanghai", days=1, budget_limit=800)
+    )
+    output_dir = _writable_test_dir("exports", uuid4().hex)
+
+    pdf_payload = persist_export_payload(state.routing_solution, export_format="pdf", output_dir=output_dir)
+    png_payload = persist_export_payload(state.routing_solution, export_format="png", output_dir=output_dir)
+    pdf_path = Path(pdf_payload["file_path"])
+    png_path = Path(png_payload["file_path"])
+
+    assert pdf_payload["content_type"] == "application/pdf"
+    assert png_payload["content_type"] == "image/png"
+    assert pdf_path.suffix == ".pdf"
+    assert png_path.suffix == ".png"
+    assert pdf_path.stat().st_size > 0
+    assert png_path.stat().st_size > 0
+    pdf_path.unlink(missing_ok=True)
+    png_path.unlink(missing_ok=True)
 
 
 def test_douglas_peucker_simplifies_route_geometry():

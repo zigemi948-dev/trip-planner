@@ -18,7 +18,7 @@
 
 - MVP 演示完成度：约 80%。
 - 生产级完成度：约 60%-65%。
-- 后端测试通过：`53 passed`。
+- 后端测试通过：`55 passed`。
 - 前端类型检查通过；Vite 可在临时输出目录构建成功。
 
 主要限制：
@@ -189,6 +189,20 @@ $env:TRIP_LLM_BASE_URL="https://api.openai.com/v1"
 $env:TRIP_LLM_MODEL="gpt-4o-mini"
 ```
 
+### HTTPS/证书配置
+
+后端访问高德、MCP、LLM 时默认使用 `certifi` CA bundle。若公司代理或本机 Conda 证书链导致 Probe 出现 `SSL` / `ASN1` 错误，可指定 CA 文件：
+
+```powershell
+$env:TRIP_SSL_CA_FILE="C:\path\to\company-ca.pem"
+```
+
+仅本地开发排障时可临时关闭校验：
+
+```powershell
+$env:TRIP_SSL_VERIFY="false"
+```
+
 LLM 失败时，意图解析会回退规则解析，行程文案会回退模板渲染。
 
 ## 常用命令
@@ -267,7 +281,7 @@ Invoke-RestMethod `
 
 最近一次检查结果：
 
-- 后端：`53 passed`。
+- 后端：`55 passed`。
 - 前端：`npx.cmd vue-tsc --noEmit` 通过。
 - 前端：`npx.cmd vite build --outDir ..\run-logs\frontend-build-check --emptyOutDir` 通过。
 - 前端默认 `npm.cmd run build` 可能因 `frontend/dist/assets` 权限失败。

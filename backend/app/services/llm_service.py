@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from app.core.config import settings
+from app.services.http_client import explain_network_error, open_url
 
 
 class LLMUnavailableError(RuntimeError):
@@ -47,10 +48,10 @@ def complete_text(system_prompt: str, user_prompt: str, temperature: float = 0.2
         method="POST",
     )
     try:
-        with urlopen(request, timeout=settings.llm_timeout_seconds) as response:
+        with open_url(request, timeout=settings.llm_timeout_seconds) as response:
             raw = response.read().decode("utf-8")
-    except (HTTPError, URLError, TimeoutError) as exc:
-        raise LLMUnavailableError(str(exc)) from exc
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise LLMUnavailableError(explain_network_error(exc)) from exc
 
     data = json.loads(raw)
     choices = data.get("choices") or []

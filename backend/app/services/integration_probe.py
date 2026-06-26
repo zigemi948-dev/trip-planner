@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.graph.state import IntegrationProbeResponse, IntegrationProbeResult
+from app.core.config import settings
 from app.services.geo_fact_service import GeoFactUnavailableError, amap_mcp_enabled, search_poi_facts
 from app.services.llm_service import LLMUnavailableError, complete_text, llm_is_enabled
 
@@ -30,7 +31,7 @@ def _probe_amap() -> IntegrationProbeResult:
             name="amap",
             status="error",
             enabled=True,
-            message=str(exc),
+            message=_probe_error_message(str(exc)),
         )
     return IntegrationProbeResult(
         name="amap",
@@ -59,7 +60,7 @@ def _probe_llm() -> IntegrationProbeResult:
             name="llm",
             status="error",
             enabled=True,
-            message=str(exc),
+            message=_probe_error_message(str(exc)),
         )
     return IntegrationProbeResult(
         name="llm",
@@ -67,3 +68,11 @@ def _probe_llm() -> IntegrationProbeResult:
         enabled=True,
         message=f"Received {len(text)} character response.",
     )
+
+
+def _probe_error_message(message: str) -> str:
+    if "TRIP_SSL_VERIFY=false" in message:
+        return message
+    if not settings.ssl_verify:
+        return f"{message}. SSL verification is disabled for local development."
+    return message

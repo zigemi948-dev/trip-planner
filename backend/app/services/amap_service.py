@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
 
 from app.algorithms.matrix_builder import build_fallback_matrix, matrix_key, traffic_multiplier
 from app.core.config import settings
 from app.graph.state import Coordinates, FinancialContext, MatrixEdge, POICandidate, TransportMode, WeatherConstraint
+from app.services.http_client import explain_network_error, open_url
 
 
 class AmapUnavailableError(RuntimeError):
@@ -199,10 +199,10 @@ def _request_json(path: str, params: dict[str, object]) -> dict:
     query = urlencode({**params, "key": settings.amap_api_key})
     url = f"{settings.amap_base_url.rstrip('/')}{path}?{query}"
     try:
-        with urlopen(url, timeout=settings.amap_timeout_seconds) as response:
+        with open_url(url, timeout=settings.amap_timeout_seconds) as response:
             payload = response.read().decode("utf-8")
-    except (HTTPError, URLError, TimeoutError) as exc:
-        raise AmapUnavailableError(str(exc)) from exc
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise AmapUnavailableError(explain_network_error(exc)) from exc
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:

@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from urllib.parse import urlsplit, urlunsplit
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.http_client import explain_network_error, open_url
 
 
 class MCPToolError(RuntimeError):
@@ -60,10 +61,10 @@ def _call_http(message: dict) -> dict:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=settings.mcp_timeout_seconds) as response:
+        with open_url(request, timeout=settings.mcp_timeout_seconds) as response:
             raw = response.read().decode("utf-8")
-    except (HTTPError, URLError, TimeoutError) as exc:
-        raise MCPToolError(str(exc)) from exc
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise MCPToolError(explain_network_error(exc)) from exc
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
