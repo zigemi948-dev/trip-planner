@@ -374,13 +374,19 @@ def test_geo_fact_keywords_are_synced_from_intent_agent_preferences():
 def test_search_poi_facts_balances_preferences(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.services.geo_fact_service.settings.provider_mode", "amap")
     monkeypatch.setattr("app.services.geo_fact_service.settings.mcp_http_url", "http://amap-mcp.example/mcp")
+    # Mock _amap_keyword_queries to prevent Chinese synonym expansion so that
+    # _search_configured_amap_pois_balanced cycles through all three keywords.
+    monkeypatch.setattr(
+        "app.services.geo_fact_service._amap_keyword_queries",
+        lambda keywords: list(keywords),
+    )
 
     def fake_tool(name: str, arguments: dict):
         keyword = arguments["keywords"][0]
         locations = {
-            "museum": ("121.4700,31.2300", "博物馆", "Museum"),
-            "food": ("121.4800,31.2310", "餐饮服务", "Food"),
-            "garden": ("121.4900,31.2320", "公园", "Garden"),
+            "museum": ("121.4700,31.2300", "\u535a\u7269\u9986", "Museum"),
+            "food": ("121.4800,31.2310", "\u9910\u996e\u670d\u52a1", "Food"),
+            "garden": ("121.4900,31.2320", "\u516c\u56ed", "Garden"),
         }
         location, poi_type, label = locations[keyword]
         return [
@@ -399,6 +405,7 @@ def test_search_poi_facts_balances_preferences(monkeypatch: pytest.MonkeyPatch):
 
     categories = {poi.category for poi in pois}
     assert {"museum", "food", "garden"} <= categories
+
 
 
 def test_market_price_context_uses_hotel_and_food_costs_without_double_counting():
@@ -1235,7 +1242,7 @@ def test_attached_route_geometry_preserves_provider_polyline_for_frontend():
         fitness_score=1,
     )
 
-    route = attach_route_geometry(hotel, route)
+    route = attach_route_geometry(hotel, route, return_geometry=[])
 
     assert bend in route.geometry
     assert route.geometry[0] == hotel.coordinates

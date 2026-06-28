@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from concurrent.futures import ThreadPoolExecutor
+import logging
 from typing import Any, Callable
 
 from app.agents.planner_agent import render_narrative
@@ -8,8 +11,11 @@ from app.algorithms.observability import build_fitness_curve, compute_route_qual
 from app.algorithms.vrp_solver import is_feasible_visit, solve_routes
 from app.graph.state import GraphStatus, HotelStay, RoutingSolution, TripState, WeatherReport
 from app.graph.state import FinancialContext, POICandidate
+from app.core.config import settings
 from app.services.matrix_service import build_time_dependent_matrix_with_source
 from app.services.provider_adapters import provider_registry
+
+logger = logging.getLogger(__name__)
 
 
 def _run_map_agent(name: str, fn: Callable[[], Any]) -> tuple[str, Any]:
@@ -29,6 +35,7 @@ def map_agents_node(state: TripState) -> TripState:
         "weather_agent": lambda: provider_registry.weather.report(state.intent_constraints),
     }
     results: dict[str, Any] = {}
+    fallback_warnings: list[str] = []
     with ThreadPoolExecutor(max_workers=len(agent_calls)) as executor:
         futures = [
             executor.submit(_run_map_agent, name, fn)
@@ -63,14 +70,38 @@ def map_agents_node(state: TripState) -> TripState:
     hotel_source = "amap" if (
         state.spatial_graph_data.hotel_anchor and state.spatial_graph_data.hotel_anchor.name != local_hotel_name
     ) else "local"
+
+    # Detect fallback conditions and emit warnings
+    if poi_source == "local":
+        fallback_warnings.append(
+            "Amap MCP POI search failed; fell back to local demo attractions. "
+            "Check network / API key / Amap MCP endpoint."
+        )
+        logger.warning(f"attraction_agent fell back to local demo data (provider_mode={settings.provider_mode})")
+    if hotel_source == "local" and poi_source == "local":
+        fallback_warnings.append(
+            "Amap MCP hotel search failed; fell back to default hotel anchor. "
+            "Check network / API key / Amap MCP endpoint."
+        )
+        logger.warning(f"hotel_agent fell back to default hotel (provider_mode={settings.provider_mode})")
+    if state.spatial_graph_data.weather_forecast and state.spatial_graph_data.weather_forecast[0].source == "fallback":
+        fallback_warnings.append(
+            "Amap MCP weather service unavailable; used fallback weather data."
+        )
+        logger.warning(f"weather_agent fell back to fallback forecast (provider_mode={settings.provider_mode})")
+
     state.emit(
         "provider_status",
         {
             "poi_source": poi_source,
             "hotel_source": hotel_source,
             "poi_count": len(state.spatial_graph_data.poi_candidates),
+            "fallback": len(fallback_warnings) > 0,
         },
     )
+    if fallback_warnings:
+        state.routing_solution.warnings.extend(fallback_warnings)
+        state.emit("fallback_warning", {"warnings": fallback_warnings})
     state.emit(
         "weather_constraints",
         {
@@ -140,7 +171,7 @@ def budget_evaluator_node(state: TripState) -> TripState:
         financial=state.financial_context,
         budget_limit=state.intent_constraints.budget_limit,
     )
-    warnings = []
+    warnings = list(state.routing_solution.warnings)
     if budget.remaining < 0:
         warnings.append("Budget limit exceeded; consider removing paid attractions or using transit.")
     for route in state.routing_solution.optimized_route:

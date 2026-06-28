@@ -17,6 +17,7 @@ from app.graph.state import (
     RouteStop,
     TransportMode,
     WeatherConstraint,
+    Coordinates
 )
 
 
@@ -562,7 +563,7 @@ def _solve_day_route(
     )
     if not population:
         route = DayRoute(day=day, stops=[], total_minutes=0, total_cost=0, fitness_score=0)
-        return attach_route_geometry(hotel, route)
+        return attach_route_geometry(hotel, route, return_geometry=[])
 
     front = [individual.candidate for individual in population if individual.rank == 0]
     best = max(
@@ -582,7 +583,14 @@ def _solve_day_route(
         total_cost=best.total_cost,
         fitness_score=best.fitness_score,
     )
-    return attach_route_geometry(hotel, route)
+    # Lookup the return-leg polyline (last stop -> hotel) from the matrix
+    return_geometry: list[Coordinates] = []
+    if best.stops:
+        last_stop = best.stops[-1]
+        return_edge = _edge(matrix, last_stop.poi.id, hotel.id, last_stop.departure_time)
+        if return_edge and return_edge.polyline:
+            return_geometry = return_edge.polyline
+    return attach_route_geometry(hotel, route, return_geometry=return_geometry)
 
 
 def solve_routes(

@@ -236,8 +236,8 @@ def _search_configured_amap_pois_balanced(city: str, keywords: list[str], limit:
     for keyword in _unique_keywords(keywords):
         keyword_terms = _amap_keyword_queries([keyword])
         # Send only a limited subset of keyword terms per round to avoid hitting
-        # the Amap free-tier QPS cap (~5 queries/second). Stop as soon as we
-        # have enough candidates.
+        # the Amap MCP server QPS cap (~5 queries/rolling window). Stop as soon
+        # as we have enough candidates.
         term_limit = max(1, min(len(keyword_terms), per_keyword_limit + 1))
         for term in keyword_terms[:term_limit]:
             payload = call_tool(
@@ -278,67 +278,16 @@ def _search_configured_amap_pois_balanced(city: str, keywords: list[str], limit:
 
 
 def _search_official_amap_pois(city: str, keywords: list[str], limit: int) -> list[POICandidate]:
-    """Read raw POIs from the official Amap MCP tool set."""
-    city_context = _official_city_context(city)
-    city_value = city_context.get("adcode") or city_context.get("city") or city
-    pois: list[POICandidate] = []
-    seen: set[str] = set()
-    queries = _official_keyword_queries(keywords)
-    per_query_limit = max(1, (limit + max(len(queries), 1) - 1) // max(len(queries), 1))
-    for keyword in queries:
-        payload = call_tool(
-            OFFICIAL_AMAP_TEXT_SEARCH_TOOL,
-            {
-                "keywords": keyword,
-                "city": city_value,
-                "citylimit": True,
-            },
-        )
-        for raw in _extract_raw_pois(payload)[:per_query_limit]:
-            raw_id = str(raw.get("id") or "")
-            detail = raw
-            if raw_id and not raw.get("location"):
-                try:
-                    detail_payload = call_tool(OFFICIAL_AMAP_SEARCH_DETAIL_TOOL, {"id": raw_id})
-                    if isinstance(detail_payload, dict):
-                        detail = {**raw, **detail_payload}
-                except MCPToolError:
-                    detail = raw
-            poi = _poi_from_official_amap(detail, fallback_category=keyword)
-            if poi is None or poi.id in seen:
-                continue
-            seen.add(poi.id)
-            pois.append(poi)
-    if len(pois) >= limit:
-        return pois[:limit]
+    """Read raw POIs from the official Amap MCP tool set.
 
-    for keyword in queries:
-        payload = call_tool(
-            OFFICIAL_AMAP_TEXT_SEARCH_TOOL,
-            {
-                "keywords": keyword,
-                "city": city_value,
-                "citylimit": True,
-            },
-        )
-        for raw in _extract_raw_pois(payload):
-            raw_id = str(raw.get("id") or "")
-            detail = raw
-            if raw_id and not raw.get("location"):
-                try:
-                    detail_payload = call_tool(OFFICIAL_AMAP_SEARCH_DETAIL_TOOL, {"id": raw_id})
-                    if isinstance(detail_payload, dict):
-                        detail = {**raw, **detail_payload}
-                except MCPToolError:
-                    detail = raw
-            poi = _poi_from_official_amap(detail, fallback_category=keyword)
-            if poi is None or poi.id in seen:
-                continue
-            seen.add(poi.id)
-            pois.append(poi)
-            if len(pois) >= limit:
-                return pois[:limit]
-    return pois[:limit]
+    The official tool names defined by the Amap MCP spec
+    (``maps_text_search``, ``maps_search_detail``, etc.) are **not**
+    exposed by the server this project connects to, so this function
+    unconditionally returns an empty list.  Keeping the function body
+    avoids changing the two-tier fallback structure in
+    :func:`search_poi_facts`.
+    """
+    return []
 
 
 def _unique_keywords(keywords: list[str]) -> list[str]:

@@ -205,6 +205,12 @@ async function handleExport(isFile: boolean) {
             {{ result.name }}: {{ result.status }} · {{ result.message }}
           </span>
         </div>
+        <div v-if="solution && solution.warnings && solution.warnings.length > 0" class="fallback-banner">
+          <strong>⚠️ Fallback Warnings</strong>
+          <p v-for="(warning, wIdx) in solution.warnings" :key="wIdx" class="fallback-warning-line">
+            {{ warning }}
+          </p>
+        </div>
       </section>
       <section v-if="store.activeJob" class="job-card">
         <strong>Job {{ store.activeJob.id.slice(0, 8) }}</strong>

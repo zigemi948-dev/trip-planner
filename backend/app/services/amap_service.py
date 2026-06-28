@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
@@ -12,6 +13,35 @@ from app.services.http_client import explain_network_error, open_url
 
 class AmapUnavailableError(RuntimeError):
     """Raised when Amap cannot return usable provider data."""
+
+
+# ---------------------------------------------------------------------------
+# Global rate limiter for the Amap REST API.
+# The Amap free tier enforces a QPS cap (~5 queries / rolling window).
+# A thread-safe token bucket guards every ``_request_json`` call so that
+# concurrent callers (map_agents_node runs hotels, weather and attractions
+# in parallel) stay safely below the limit.
+# ---------------------------------------------------------------------------
+import threading
+_AMAP_API_LIMIT = 3          # < 5
+_AMAP_API_WINDOW = 1.0       # seconds
+_amap_lock = threading.Lock()
+_amap_timestamps: list[float] = []
+
+
+def _throttle_amap_api() -> None:
+    """Block the caller until it is safe to send another Amap API request."""
+    while True:
+        with _amap_lock:
+            now = time.monotonic()
+            cutoff = now - _AMAP_API_WINDOW
+            while _amap_timestamps and _amap_timestamps[0] < cutoff:
+                _amap_timestamps.pop(0)
+            if len(_amap_timestamps) < _AMAP_API_LIMIT:
+                _amap_timestamps.append(now)
+                return
+            wait = _amap_timestamps[0] - cutoff
+        time.sleep(max(wait, 0.01))
 
 
 def amap_is_enabled() -> bool:
@@ -196,6 +226,7 @@ def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) ->
 
 
 def _request_json(path: str, params: dict[str, object]) -> dict:
+    _throttle_amap_api()
     query = urlencode({**params, "key": settings.amap_api_key})
     url = f"{settings.amap_base_url.rstrip('/')}{path}?{query}"
     try:

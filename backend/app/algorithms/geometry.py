@@ -22,8 +22,12 @@ def interpolate_segment(origin: Coordinates, destination: Coordinates, steps: in
     return points
 
 
-def build_route_geometry(hotel: POICandidate, route: DayRoute) -> list[Coordinates]:
-    """Build route geometry from provider polylines, with map-safe fallback segments."""
+def build_route_geometry(hotel: POICandidate, route: DayRoute, return_geometry: list[Coordinates] | None = None) -> list[Coordinates]:
+    """Build route geometry from provider polylines, with map-safe fallback segments.
+
+    The optional ``return_geometry`` parameter lets callers supply the polyline
+    for the final leg (last stop -> hotel). When provided, the road-following
+    path is preserved instead of rendering a straight line."""
     if not route.stops:
         return [hotel.coordinates]
 
@@ -32,8 +36,15 @@ def build_route_geometry(hotel: POICandidate, route: DayRoute) -> list[Coordinat
     for stop in route.stops:
         geometry = _append_route_segment(geometry, previous, stop.poi.coordinates, stop.inbound_geometry)
         previous = stop.poi.coordinates
-    geometry = _append_segment(geometry, previous, hotel.coordinates)
+
+    # Return leg: use the caller-supplied return_geometry when available
+    # so the road-following path is preserved instead of a straight line.
+    # Note: we DO NOT reverse the last inbound polyline—that polyline is the
+    #       path FROM the previous stop (or hotel) TO the last stop,
+    #       which is the opposite direction of what the return leg needs.
+    geometry = _append_route_segment(geometry, previous, hotel.coordinates, return_geometry)
     return geometry
+
 
 
 def _append_route_segment(
@@ -115,9 +126,12 @@ def compute_bounds(points: list[Coordinates]) -> BoundingBox | None:
     )
 
 
-def attach_route_geometry(hotel: POICandidate, route: DayRoute) -> DayRoute:
-    """Attach simplified geometry and bounds to a day route."""
-    dense = build_route_geometry(hotel, route)
+def attach_route_geometry(hotel: POICandidate, route: DayRoute, return_geometry: list[Coordinates] | None = None) -> DayRoute:
+    """Attach simplified geometry and bounds to a day route.
+
+    The optional ``return_geometry`` is forwarded to ``build_route_geometry``.
+    """
+    dense = build_route_geometry(hotel, route, return_geometry=return_geometry)
     if any(stop.inbound_geometry for stop in route.stops):
         simplified = dense
     else:
