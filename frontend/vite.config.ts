@@ -14,5 +14,9 @@ export default defineConfig({
         ws: true
       }
     }
+  },
+  build: {
+    // Empty dist directory before build to avoid stale files
+    emptyOutDir: true,
   }
 });

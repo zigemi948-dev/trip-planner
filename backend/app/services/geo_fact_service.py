@@ -154,6 +154,17 @@ def fetch_weather_forecast_facts(city: str, days: int) -> list[DailyWeatherForec
     _require_amap_mode()
     errors: list[str] = []
     try:
+        payload = call_tool(
+            settings.amap_mcp_weather_forecast_tool,
+            {"city": normalize_amap_city(city), "days": days},
+        )
+        forecasts = _coerce_weather_forecasts(payload, days, source="amap:mcp")
+        if forecasts:
+            return forecasts
+    except (MCPToolError, ValueError, TypeError) as exc:
+        errors.append(str(exc))
+
+    try:
         payload = call_tool(settings.amap_mcp_weather_tool, {"city": normalize_amap_city(city), "days": days})
         forecasts = _coerce_weather_forecasts(payload, days, source="amap:mcp")
         if forecasts:

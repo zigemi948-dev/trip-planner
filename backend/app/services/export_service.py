@@ -376,3 +376,69 @@ def _temperature_text(low: float | None, high: float | None) -> str:
     if low is not None:
         return f"{low:.0f} °C"
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Export cleanup
+# ---------------------------------------------------------------------------
+import logging as _logging
+import time as time_module
+
+_logger = _logging.getLogger(__name__)
+
+
+def cleanup_old_exports(
+    export_dir: str | Path = "exports",
+    max_age_days: int | None = None,
+    max_files: int | None = None,
+) -> int:
+    """Remove export artifacts exceeding age or count limits.
+
+    Returns the number of removed files.
+    """
+    from app.core.config import settings
+
+    age_limit = max_age_days or settings.export_cleanup_max_age_days
+    count_limit = max_files or settings.export_cleanup_max_files
+    directory = resolve_backend_path(export_dir)
+
+    if not directory.exists():
+        return 0
+
+    now = time_module.time()
+    cutoff = now - (age_limit * 86400)
+    removed = 0
+
+    # Collect all export files sorted by modification time (oldest first)
+    export_files = sorted(
+        [p for p in directory.iterdir() if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+    )
+
+    # 1. Remove by age
+    files_to_remove: list[Path] = []
+    for path in list(export_files):
+        try:
+            if path.stat().st_mtime < cutoff:
+                files_to_remove.append(path)
+                export_files.remove(path)
+        except OSError:
+            continue
+
+    # 2. If still over count limit, remove oldest
+    overflow = len(export_files) - count_limit
+    if overflow > 0:
+        files_to_remove.extend(export_files[:overflow])
+
+    # 3. Delete
+    for path in files_to_remove:
+        try:
+            path.unlink()
+            removed += 1
+            _logger.debug("Removed stale export: %s", path)
+        except OSError:
+            pass
+
+    if removed:
+        _logger.info("Export cleanup: removed %d files (age>%dd or count>%d)", removed, age_limit, count_limit)
+    return removed

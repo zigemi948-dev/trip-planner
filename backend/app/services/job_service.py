@@ -4,10 +4,15 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 from threading import RLock
+import logging
+
+from datetime import datetime, timedelta, timezone
 
 from app.core.config import resolve_backend_path, settings
 from app.graph.state import IntentConstraints, JobStatus, PlanningJob, PlanningJobEvents, PlanningJobSummary
 from app.graph.workflow import iter_trip_workflow
+
+logger = logging.getLogger(__name__)
 
 
 class JobStore:
@@ -107,14 +112,20 @@ class JobStore:
     def _load(self) -> None:
         if not self.storage_path.exists():
             return
+        now = datetime.now(timezone.utc)
         for line in self.storage_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             payload = json.loads(line)
+            # Backward compat: pre-created_at records get epoch-0 timestamp
+            # so cleanup can purge them on first run.
+            if "created_at" not in payload:
+                payload["created_at"] = datetime.min.replace(tzinfo=timezone.utc).isoformat()
             job = PlanningJob.model_validate(payload)
             self._jobs[job.id] = job
 
     def _persist(self, job: PlanningJob) -> None:
+        """Persist job to JSONL file. Falls back to in-memory-only on write failure."""
         try:
             self.storage_path.parent.mkdir(parents=True, exist_ok=True)
             self._jobs[job.id] = job
@@ -125,6 +136,71 @@ class JobStore:
             self.persistence_error = ""
         except OSError as exc:
             self.persistence_error = str(exc)
+            # Graceful degradation: jobs remain in memory only
+            logger.warning(
+                "Job store persistence failed (path=%s, error=%s). "
+                "Jobs will remain in memory and will not survive restart.",
+                self.storage_path, exc,
+            )
+
+    # ------------------------------------------------------------------
+    # Data lifecycle management
+    # ------------------------------------------------------------------
+    def cleanup_old_jobs(
+        self,
+        max_age_hours: int | None = None,
+        max_jobs: int | None = None,
+    ) -> int:
+        """Remove jobs exceeding age or count limits.
+
+        Returns the number of removed jobs.
+        """
+        age_limit = max_age_hours or settings.job_cleanup_max_age_hours
+        count_limit = max_jobs or settings.job_cleanup_max_jobs
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=age_limit)
+        removed = 0
+        with self._lock:
+            # 1. Remove by age (regardless of status)
+            job_ids_to_remove = set()
+            for job_id, job in list(self._jobs.items()):
+                if job.created_at.replace(tzinfo=timezone.utc) < cutoff:
+                    job_ids_to_remove.add(job_id)
+
+            # 2. If still over count limit, remove oldest
+            remaining = sorted(
+                [(jid, self._jobs[jid]) for jid in self._jobs if jid not in job_ids_to_remove],
+                key=lambda item: item[1].created_at,
+                reverse=False,
+            )
+            overflow = len(remaining) - count_limit
+            if overflow > 0:
+                for jid in remaining[:overflow]:
+                    job_ids_to_remove.add(jid)
+
+            for jid in job_ids_to_remove:
+                del self._jobs[jid]
+                removed += 1
+
+            # Repersist if anything was removed
+            if removed > 0:
+                self._persist_all()
+
+        logger.info("Job store cleanup: removed %d jobs (age>%dh or count>%d)", removed, age_limit, count_limit)
+        return removed
+
+    def _persist_all(self) -> None:
+        """Overwrite the JSONL file with the current in-memory snapshot."""
+        if not self.storage_path:
+            return
+        try:
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.storage_path.open("w", encoding="utf-8") as handle:
+                for job in self._jobs.values():
+                    handle.write(job.model_dump_json() + "\n")
+            self.persistence_error = ""
+        except OSError as exc:
+            self.persistence_error = str(exc)
+            logger.warning("Job store full-persist failed (path=%s, error=%s)", self.storage_path, exc)
 
 
 job_store = JobStore()

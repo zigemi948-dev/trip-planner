@@ -2,6 +2,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc --noEmit && vite build",
+    "build:fallback": "vite build --outDir ..\\run-logs\\frontend-dist-check --emptyOutDir",
+    "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

@@ -4,6 +4,7 @@ from app.services.amap_service import (
     AmapUnavailableError,
     build_amap_matrix,
     fetch_weather_constraints,
+    fetch_weather_forecast,
     resolve_hotel,
     search_pois,
 )
@@ -30,3 +31,8 @@ def hotel_anchor_tool(city: str) -> POICandidate:
 def weather_constraints_tool(city: str) -> list[WeatherConstraint]:
     """Return Amap weather-derived solver constraints."""
     return fetch_weather_constraints(city)
+
+
+def weather_forecast_tool(city: str, days: int = 3) -> list[dict]:
+    """Return Amap multi-day weather forecast."""
+    return fetch_weather_forecast(city, days)

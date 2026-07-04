@@ -6,8 +6,19 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request
 from uuid import uuid4
 
+import logging
+
 from app.core.config import settings
-from app.services.http_client import explain_network_error, open_url
+from app.services.http_client import (
+    CircuitBreakerOpenError,
+    explain_network_error,
+    mcp_circuit_breaker,
+    open_url,
+    retry_on_error,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 class MCPToolError(RuntimeError):
@@ -51,24 +62,38 @@ def _call_in_process(message: dict) -> dict:
 
 def _call_http(message: dict) -> dict:
     url = _mcp_endpoint_url(settings.mcp_http_url)
-    request = Request(
-        url,
-        data=json.dumps(message).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        },
-        method="POST",
-    )
+
+    def _do_request() -> dict:
+        request = Request(
+            url,
+            data=json.dumps(message).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        try:
+            with open_url(request, timeout=settings.mcp_timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise MCPToolError(explain_network_error(exc)) from exc
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise MCPToolError("MCP response was not valid JSON") from exc
+
     try:
-        with open_url(request, timeout=settings.mcp_timeout_seconds) as response:
-            raw = response.read().decode("utf-8")
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise MCPToolError(explain_network_error(exc)) from exc
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise MCPToolError("MCP response was not valid JSON") from exc
+        return retry_on_error(
+            _do_request,
+            max_attempts=settings.amap_retry_max_attempts,
+            base_delay_ms=settings.amap_retry_base_delay_ms,
+            circuit_breaker=mcp_circuit_breaker,
+            logger_name="mcp_client",
+        )
+    except CircuitBreakerOpenError as exc:
+        logger.warning("MCP circuit breaker open; skipping tool call")
+        raise MCPToolError(str(exc)) from exc
 
 
 def _mcp_endpoint_url(raw_url: str) -> str:

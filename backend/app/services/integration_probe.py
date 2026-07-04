@@ -1,9 +1,47 @@
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from app.graph.state import IntegrationProbeResponse, IntegrationProbeResult
 from app.core.config import settings
 from app.services.geo_fact_service import GeoFactUnavailableError, amap_mcp_enabled, search_poi_facts
+from app.services.http_client import (
+    amap_circuit_breaker,
+    llm_circuit_breaker,
+    mcp_circuit_breaker,
+)
 from app.services.llm_service import LLMUnavailableError, complete_text, llm_is_enabled
+
+
+class ProbeResult(BaseModel):
+    """Individual circuit breaker probe result."""
+
+    name: str
+    state: str  # "closed" | "open" | "half-open"
+    failure_count: int
+    last_failure_age_seconds: float | None
+
+
+def probe_circuit_breakers() -> list[ProbeResult]:
+    """Return the current state of all circuit breakers."""
+    now = __import__("time").time()
+    results: list[ProbeResult] = []
+    for name, cb in (
+        ("amap", amap_circuit_breaker),
+        ("mcp", mcp_circuit_breaker),
+        ("llm", llm_circuit_breaker),
+    ):
+        last_failure = cb.last_failure_time
+        age = (now - last_failure) if last_failure and cb.state == "open" else None
+        results.append(
+            ProbeResult(
+                name=name,
+                state=cb.state,
+                failure_count=cb.failure_count,
+                last_failure_age_seconds=round(age, 2) if age is not None else None,
+            )
+        )
+    return results
 
 
 def probe_integrations() -> IntegrationProbeResponse:

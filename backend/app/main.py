@@ -13,7 +13,11 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
-    """Create the FastAPI application and register transport adapters."""
+    """Create the FastAPI application and register transport adapters.
+
+    On startup, stale data (old jobs and exports) are cleaned automatically
+    to prevent unbounded disk growth.
+    """
     app = FastAPI(title=settings.app_name, version=settings.app_version)
     app.add_middleware(
         CORSMiddleware,
@@ -33,6 +37,30 @@ def create_app() -> FastAPI:
         level=logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    # -----------------------------------------------------------------------
+    # Startup lifecycle hooks — clean stale data without blocking the HTTP
+    # server from becoming ready.
+    # -----------------------------------------------------------------------
+    @app.on_event("startup")
+    async def _cleanup_on_startup() -> None:
+        try:
+            from app.services.job_service import job_store
+
+            removed = job_store.cleanup_old_jobs()
+            if removed:
+                logger.info("Startup cleanup: removed %d stale job(s)", removed)
+        except Exception:
+            logger.warning("Startup cleanup: job cleanup failed (non-fatal)", exc_info=True)
+
+        try:
+            from app.services.export_service import cleanup_old_exports
+
+            removed = cleanup_old_exports()
+            if removed:
+                logger.info("Startup cleanup: removed %d stale export(s)", removed)
+        except Exception:
+            logger.warning("Startup cleanup: export cleanup failed (non-fatal)", exc_info=True)
 
     return app
 

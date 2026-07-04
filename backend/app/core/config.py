@@ -56,20 +56,32 @@ class Settings(BaseModel):
     amap_mcp_poi_tool: str = "amap_poi_search"
     amap_mcp_hotel_tool: str = "amap_hotel_anchor"
     amap_mcp_weather_tool: str = "amap_weather_constraints"
+    amap_mcp_weather_forecast_tool: str = "amap_weather_forecast"
     amap_mcp_matrix_tool: str = "amap_distance_matrix"
     matrix_cache_ttl_seconds: int = 3600
     job_store_path: str = "data/jobs.jsonl"
     unsplash_access_key: str = ""
+    # --- 重试与熔断配置 ---
+    amap_retry_max_attempts: int = 3
+    amap_retry_base_delay_ms: int = 500
+    amap_circuit_breaker_threshold: int = 5
+    amap_circuit_breaker_reset_seconds: int = 30
+    # --- 日志与清理配置 ---
+    log_level: str = "INFO"
+    export_cleanup_max_age_days: int = 3
+    export_cleanup_max_files: int = 50
+    job_cleanup_max_age_hours: int = 48
+    job_cleanup_max_jobs: int = 200
 
 
 def resolve_backend_path(path: str | Path) -> Path:
     """Resolve app-owned runtime paths consistently from repo or backend cwd."""
     candidate = Path(path)
     if candidate.is_absolute():
-        return candidate
+        return candidate.resolve()
     if candidate.parts and candidate.parts[0] == "backend":
-        return PROJECT_ROOT / candidate
-    return BACKEND_ROOT / candidate
+        return (PROJECT_ROOT / candidate).resolve()
+    return (BACKEND_ROOT / candidate).resolve()
 
 
 def _csv_env(name: str, default: list[str]) -> list[str]:
@@ -110,8 +122,18 @@ settings = Settings(
     amap_mcp_poi_tool=os.getenv("TRIP_AMAP_MCP_POI_TOOL", "amap_poi_search"),
     amap_mcp_hotel_tool=os.getenv("TRIP_AMAP_MCP_HOTEL_TOOL", "amap_hotel_anchor"),
     amap_mcp_weather_tool=os.getenv("TRIP_AMAP_MCP_WEATHER_TOOL", "amap_weather_constraints"),
+    amap_mcp_weather_forecast_tool=os.getenv("TRIP_AMAP_MCP_WEATHER_FORECAST_TOOL", "amap_weather_forecast"),
     amap_mcp_matrix_tool=os.getenv("TRIP_AMAP_MCP_MATRIX_TOOL", "amap_distance_matrix"),
     matrix_cache_ttl_seconds=int(os.getenv("TRIP_MATRIX_CACHE_TTL_SECONDS", "3600")),
     job_store_path=os.getenv("TRIP_JOB_STORE_PATH", "data/jobs.jsonl"),
-    unsplash_access_key=os.getenv("UNSPLASH_ACCESS_KEY", "")
+    unsplash_access_key=os.getenv("UNSPLASH_ACCESS_KEY", ""),
+    amap_retry_max_attempts=int(os.getenv("TRIP_AMAP_RETRY_MAX_ATTEMPTS", "3")),
+    amap_retry_base_delay_ms=int(os.getenv("TRIP_AMAP_RETRY_BASE_DELAY_MS", "500")),
+    amap_circuit_breaker_threshold=int(os.getenv("TRIP_AMAP_CIRCUIT_BREAKER_THRESHOLD", "5")),
+    amap_circuit_breaker_reset_seconds=int(os.getenv("TRIP_AMAP_CIRCUIT_BREAKER_RESET_SECONDS", "30")),
+    log_level=os.getenv("TRIP_LOG_LEVEL", "INFO"),
+    export_cleanup_max_age_days=int(os.getenv("TRIP_EXPORT_CLEANUP_MAX_AGE_DAYS", "3")),
+    export_cleanup_max_files=int(os.getenv("TRIP_EXPORT_CLEANUP_MAX_FILES", "50")),
+    job_cleanup_max_age_hours=int(os.getenv("TRIP_JOB_CLEANUP_MAX_AGE_HOURS", "48")),
+    job_cleanup_max_jobs=int(os.getenv("TRIP_JOB_CLEANUP_MAX_JOBS", "200"))
 )

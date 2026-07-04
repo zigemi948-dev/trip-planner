@@ -5,14 +5,25 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
+import logging
+
 from app.algorithms.matrix_builder import build_fallback_matrix, matrix_key, traffic_multiplier
 from app.core.config import settings
 from app.graph.state import Coordinates, FinancialContext, MatrixEdge, POICandidate, TransportMode, WeatherConstraint
-from app.services.http_client import explain_network_error, open_url
+from app.services.http_client import (
+    CircuitBreakerOpenError,
+    amap_circuit_breaker,
+    explain_network_error,
+    open_url,
+    retry_on_error,
+)
 
 
 class AmapUnavailableError(RuntimeError):
     """Raised when Amap cannot return usable provider data."""
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +179,46 @@ def fetch_weather_constraints(city: str) -> list[WeatherConstraint]:
     return constraints
 
 
+def fetch_weather_forecast(city: str, days: int = 3) -> list[dict]:
+    """Fetch multi-day weather forecast via Amap REST API (extensions=all).
+
+    Returns a list of dicts with keys: day, date, weather, temperature_min,
+    temperature_max, wind, source.
+    """
+    if not amap_is_enabled():
+        raise AmapUnavailableError("Amap provider is not enabled")
+
+    payload = _request_json(
+        "/weather/weatherInfo",
+        {
+            "city": city,
+            "extensions": "all",
+        },
+    )
+    forecasts = payload.get("forecasts") or []
+    if not forecasts:
+        raise AmapUnavailableError("Amap returned no weather forecasts")
+    first = forecasts[0]
+    casts = first.get("casts") or []
+    if not casts:
+        raise AmapUnavailableError("Amap returned empty casts")
+
+    result: list[dict] = []
+    for index, cast in enumerate(casts[:days], start=1):
+        result.append(
+            {
+                "day": index,
+                "date": str(cast.get("date") or ""),
+                "weather": str(cast.get("dayweather") or ""),
+                "temperature_min": _optional_float(cast.get("nighttemp")),
+                "temperature_max": _optional_float(cast.get("daytemp")),
+                "wind": str(cast.get("daywind") or ""),
+                "source": "amap:rest",
+            }
+        )
+    return result
+
+
 def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) -> dict[str, MatrixEdge]:
     """Build directed travel edges from Amap direction data with distance fallback."""
     if not amap_is_enabled():
@@ -226,21 +277,36 @@ def build_amap_matrix(nodes: list[POICandidate], financial: FinancialContext) ->
 
 
 def _request_json(path: str, params: dict[str, object]) -> dict:
-    _throttle_amap_api()
-    query = urlencode({**params, "key": settings.amap_api_key})
-    url = f"{settings.amap_base_url.rstrip('/')}{path}?{query}"
+    """Execute an Amap REST API call with retry + circuit breaker."""
+
+    def _do_request() -> dict:
+        _throttle_amap_api()
+        query = urlencode({**params, "key": settings.amap_api_key})
+        url = f"{settings.amap_base_url.rstrip('/')}{path}?{query}"
+        try:
+            with open_url(url, timeout=settings.amap_timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise AmapUnavailableError(explain_network_error(exc)) from exc
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise AmapUnavailableError("Amap response was not valid JSON") from exc
+        if str(data.get("status")) != "1":
+            raise AmapUnavailableError(str(data.get("info") or "Amap request failed"))
+        return data
+
     try:
-        with open_url(url, timeout=settings.amap_timeout_seconds) as response:
-            payload = response.read().decode("utf-8")
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise AmapUnavailableError(explain_network_error(exc)) from exc
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise AmapUnavailableError("Amap response was not valid JSON") from exc
-    if str(data.get("status")) != "1":
-        raise AmapUnavailableError(str(data.get("info") or "Amap request failed"))
-    return data
+        return retry_on_error(
+            _do_request,
+            max_attempts=settings.amap_retry_max_attempts,
+            base_delay_ms=settings.amap_retry_base_delay_ms,
+            circuit_breaker=amap_circuit_breaker,
+            logger_name="amap_service",
+        )
+    except CircuitBreakerOpenError as exc:
+        logger.warning("Amap circuit breaker open; skipping request to %s", path)
+        raise AmapUnavailableError(str(exc)) from exc
 
 
 def _poi_from_amap(item: dict, fallback_category: str) -> POICandidate | None:

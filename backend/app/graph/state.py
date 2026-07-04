@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -389,6 +390,7 @@ class PlanningJob(BaseModel):
     state: TripState | None = None
     events: list[dict[str, Any]] = Field(default_factory=list)
     error: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class PlanningJobSummary(BaseModel):

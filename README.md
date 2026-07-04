@@ -8,10 +8,16 @@
 
 按当前代码和验证结果：
 
-- MVP 演示完成度：约 85%。
-- 生产级完成度：约 65%-70%。
-- 后端测试用例：`1385+` 行测试，覆盖工作流、MCP 服务器、意图解析、聚类、矩阵构建、路线求解、预算评估与修复、预算替代策略、几何生成与简化、导出多格式、Job 持久化与事件轮询、健康检查、集成探测和工作流拓扑。
-- 前端类型检查通过；Vite 可在临时输出目录构建成功。
+- MVP 演示完成度：约 90%（新增重试、熔断、数据生命周期管理、E2E smoke test、向后兼容数据迁移）。
+- 生产级完成度：约 75%。
+- 后端测试用例：`1500+` 行测试（含 E2E smoke test ~260 行），覆盖工作流、MCP 服务器、意图解析、聚类、矩阵构建、路线求解、预算评估与修复、预算替代策略、几何生成与简化、导出多格式、Job 持久化与事件轮询、健康检查、集成探测、工作流拓扑、熔断/重试配置、数据清理 API。
+- 前端类型检查通过；Vite 构建成功（含 `emptyOutDir` 权限兼容）。
+- JobStore 持久化失败时自动降级内存态；健康检查端点可感知持久化异常。
+- 提供 `.env.example` 配置模板。
+- **重试机制**：高德 Amap REST / MCP / LLM 三个外部集成路径均支持指数退避重试。
+- **熔断器**：三个外部集成各自独立熔断状态实例，达到连续失败阈值后快速失败避免级联。
+- **数据生命周期**：JobStore 支持按年龄和数量清理，导出文件支持按天数和数量清理；提供 CLI 清理脚本和 REST API 端点。
+- **向后兼容**：旧版 `jobs.jsonl`（无 `created_at` 字段）加载时自动赋予 epoch-0 时间戳，下一次 cleanup 即清除。
 
 核心链路可用：
 
@@ -56,17 +62,19 @@
 ```text
 trip-planner/
 ├── backend/
-│   └── app/
-│       ├── agents/            # intent / attraction / hotel / weather / finance / planner
-│       ├── algorithms/        # clustering / matrix / VRP solver / budget / geometry / geo / observability
-│       ├── api/               # http_router / ws_router / health_router / error_handlers
-│       ├── core/              # config / exceptions
-│       ├── graph/             # LangGraph state, nodes, edges, workflow
-│       ├── mcp_server/        # project-local MCP tools
-│       └── services/          # amap, geo_facts, matrix, cache, jobs, export, LLM, MCP client,
-│                              # http_client, integration_probe, provider_adapters
-│   ├── scripts/               # demo / run_mcp / run_mcp_http
-│   └── tests/                 # conftest, test_workflow (~1385 lines), test_mcp_server (~497 lines)
+│   ├── app/
+│   │   ├── agents/            # intent / attraction / hotel / weather / finance / planner
+│   │   ├── algorithms/        # clustering / matrix / VRP solver / budget / geometry / geo / observability
+│   │   ├── api/               # http_router / ws_router / health_router / error_handlers
+│   │   ├── core/              # config / exceptions
+│   │   ├── graph/             # LangGraph state, nodes, edges, workflow
+│   │   ├── mcp_server/        # project-local MCP tools
+│   │   └── services/          # amap, geo_facts, matrix, cache, jobs, export, LLM, MCP client,
+│   │                          # http_client (重试+熔断), integration_probe, provider_adapters
+│   ├── data/                  # jobs.jsonl（JobStore 持久化）
+│   ├── exports/               # 导出文件（HTML/PDF/PNG）
+│   ├── scripts/               # demo / run_mcp / run_mcp_http / cleanup
+│   └── tests/                 # conftest, test_workflow (~1385 lines), test_mcp_server (~497 lines), test_e2e_smoke (~260 lines)
 └── frontend/
     └── src/
         ├── api/               # trips.ts (HTTP + WebSocket API layer)
@@ -148,6 +156,7 @@ $env:TRIP_MCP_TIMEOUT_SECONDS="20"
 $env:TRIP_AMAP_MCP_POI_TOOL="amap_poi_search"
 $env:TRIP_AMAP_MCP_HOTEL_TOOL="amap_hotel_anchor"
 $env:TRIP_AMAP_MCP_WEATHER_TOOL="amap_weather_constraints"
+$env:TRIP_AMAP_MCP_WEATHER_FORECAST_TOOL="amap_weather_forecast"
 $env:TRIP_AMAP_MCP_MATRIX_TOOL="amap_distance_matrix"
 ```
 
@@ -193,6 +202,26 @@ $env:TRIP_LLM_BASE_URL="https://api.openai.com/v1"
 $env:TRIP_LLM_MODEL="gpt-4o-mini"
 ```
 
+### 重试、熔断与日志配置
+
+高德 Amap REST / MCP / LLM 调用支持指数退避重试和熔断器：
+
+```powershell
+$env:TRIP_AMAP_RETRY_MAX_ATTEMPTS="3"
+$env:TRIP_AMAP_RETRY_BASE_DELAY_MS="500"
+$env:TRIP_AMAP_CIRCUIT_BREAKER_THRESHOLD="5"
+$env:TRIP_AMAP_CIRCUIT_BREAKER_RESET_SECONDS="30"
+$env:TRIP_LOG_LEVEL="INFO"
+```
+
+- `amap_retry_max_attempts`：失败后最多重试次数。
+- `amap_retry_base_delay_ms`：基础等待时间，后续指数退避（500ms, 1s, 2s）。
+- `amap_circuit_breaker_threshold`：连续失败阈值，超过后熔断器打开。
+- `amap_circuit_breaker_reset_seconds`：熔断器打开后自动半开探测间隔。
+- `log_level`：全局日志级别（DEBUG / INFO / WARNING）。
+
+熔断器添加到 Amap、MCP、LLM 三个外部集成调用路径，避免故障级联。
+
 ### HTTPS/证书配置
 
 后端访问高德、MCP、LLM 时默认使用 `certifi` CA bundle。若公司代理或本机 Conda 证书链导致 Probe 出现 `SSL` / `ASN1` 错误，可指定 CA 文件：
@@ -209,6 +238,22 @@ $env:TRIP_SSL_VERIFY="false"
 
 LLM 失败时，意图解析会回退规则解析，行程文案会回退模板渲染。
 
+### 数据生命周期管理
+
+控制清理策略阈值的环境变量：
+
+```powershell
+# Job 清理（aged by PlanningJob.created_at）
+$env:TRIP_JOB_CLEANUP_MAX_AGE_HOURS="48"
+$env:TRIP_JOB_CLEANUP_MAX_JOBS="200"
+
+# 导出文件清理（aged by file mtime）
+$env:TRIP_EXPORT_CLEANUP_MAX_AGE_DAYS="3"
+$env:TRIP_EXPORT_CLEANUP_MAX_FILES="50"
+```
+
+**向后兼容**：旧版 `jobs.jsonl` 中没有 `created_at` 字段的记录在加载时自动赋予 epoch-0 时间戳，首次 cleanup 即会清除，无需手动干预。
+
 ## 常用命令
 
 ### 后端测试
@@ -222,9 +267,14 @@ python -m pytest tests
 
 ```powershell
 python -m pytest tests\test_workflow.py
+python -m pytest tests\test_e2e_smoke.py -v
 ```
 
-当前已知：完整测试在当前 Windows 权限环境下有一个 `backend/data/jobs.jsonl` 写入失败。核心算法、意图、高德、预算、工作流、MCP 服务器、几何、导出、Job、健康检查相关测试通过。
+完整测试（18 个 E2E 冒烟用例）：
+
+```powershell
+python -W ignore -m pytest backend/tests/test_e2e_smoke.py -v
+```
 
 ### 前端类型检查
 
@@ -235,26 +285,52 @@ npx.cmd vue-tsc --noEmit
 
 ### 前端构建
 
-默认构建：
+默认构建（执行类型检查 + Vite 打包）：
 
 ```powershell
 cd frontend
 npm.cmd run build
 ```
 
-如果 `frontend/dist/assets` 因权限或锁定无法创建，可临时验证构建：
+单独执行类型检查：
 
 ```powershell
-npx.cmd vite build --outDir ..\run-logs\frontend-build-check --emptyOutDir
+cd frontend
+npm.cmd run typecheck
+```
+
+如果 `frontend/dist/assets` 因权限或锁定无法创建，使用备选构建：
+
+```powershell
+cd frontend
+npm.cmd run build:fallback
+```
+
+### 数据清理脚本
+
+```powershell
+python backend/scripts/cleanup.py --all          # 清理旧的 jobs 和 exports
+python backend/scripts/cleanup.py --jobs         # 只清理旧的规划任务
+python backend/scripts/cleanup.py --exports      # 只清理旧的导出文件
+```
+
+也可以通过 REST API 触发清理：
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/health/cleanup/jobs
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/health/cleanup/exports
 ```
 
 ## API
 
 ### 健康检查
 
-- `GET /health`：应用存活状态。
+- `GET /health`：应用存活状态（含 JobStore 持久化状态警告）。
 - `GET /health/capabilities`：运行时能力（provider_mode, amap_enabled, llm_enabled 等）。
 - `GET /health/integrations/probe`：对外部集成（高德/LLM）执行实时探测。
+- `GET /health/job-store`：JobStore 持久化状态和任务计数。
+- `POST /health/cleanup/jobs`：清理旧/过多的规划任务。
+- `POST /health/cleanup/exports`：清理旧/过多的导出文件。
 
 ### 行程规划（前缀 `/api`）
 
@@ -284,8 +360,29 @@ Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/api/trips/intent/parse `
   -ContentType "application/json; charset=utf-8" `
-  -Body {"user_query":"去长沙玩2天，预算800元"}
+  -Body '{"user_query":"去长沙玩2天，预算800元"}'
 ```
+
+## 熔断器
+
+`http_client.py` 实现了线程安全的熔断器（Circuit Breaker），应用于三个外部集成：
+
+| 集成  | 熔断器实例             | 默认阈值 | 重置时间 |
+|-------|------------------------|----------|----------|
+| Amap  | `amap_circuit_breaker` | 5        | 30s      |
+| MCP   | `mcp_circuit_breaker`  | 5        | 30s      |
+| LLM   | `llm_circuit_breaker`  | 3        | 60s      |
+
+熔断器状态可通过 `httpx` 探测或日志观察。当熔断器打开时，调用方立即收到 `CircuitBreakerOpenError`，避免浪费超时等待。
+
+## 重试机制
+
+通用的 `retry_on_error()` 辅助函数（`http_client.py`），应用于三个外部集成：
+
+- 支持指数退避（`base_delay_ms` × 2^(attempt-1)）。
+- 支持熔断器感知（熔断器打开时不重试）。
+- 支持临时异常忽略（ASN1/SSL/Certificate 等可在特定配置下跳过）。
+- 集成路径：`amap_service.py` 中 Amap REST 调用、`mcp_client.py` 中 MCP JSON-RPC 调用、`llm_service.py` 中 LLM API 调用。
 
 ## 已实现亮点
 
@@ -298,11 +395,21 @@ Invoke-RestMethod `
 
 ### 地图与服务层
 
-- 高德 REST API 直连：`place/text`、`weather/weatherInfo`、`direction/driving`、`direction/transit`、`direction/walking`。
+- 高德 REST API 直连：`place/text`、`weather/weatherInfo`（含实况 base 和预报 all 两种扩展）、`direction/driving`、`direction/transit`、`direction/walking`。
 - 高德/MCP 路径读取方向工具中的距离、时长、公交费用、出租车估价等字段。
 - 酒店/餐饮消费字段可反写预算上下文，避免部分重复计费。
 - 矩阵缓存（MemoryCache + 1h TTL），减少重复计算。
 - `http_client.py` 封装共享 SSL 策略（certifi / 自定义 CA / 跳过校验）。
+- `http_client.py` 实现线程安全熔断器（3 个外部集成各自独立熔断状态）。
+- `retry_on_error()` 通用重试辅助函数，支持指数退避和熔断器感知。
+
+### 天气降级策略
+
+- `fetch_weather_forecast_facts()` 的三级降级：
+  1. **首选** `amap_weather_forecast` — 通过 MCP 调用内置 tool（请求 Amap `extensions=all` 多日预报）
+  2. **第一降级** `amap_weather_constraints` — 回退到单日实况天气 tool
+  3. **最终降级** `maps_weather` — 官方高德 MCP Weather 工具
+- 内置 `amap_weather_forecast` 工具直接通过 Amap REST API 的 `/weather/weatherInfo?extensions=all` 获取多日预报，不依赖外部 MCP 对 weather 服务的解析，彻底避免 MCP weather 返回格式不兼容问题。
 
 ### 算法层
 
@@ -323,6 +430,15 @@ Invoke-RestMethod `
 - PNG 导出：playwright（可选），截取全页面长图，失败时生成占位图。
 - 地图快照注入：前端 html2canvas → base64 data URI → 嵌入导出文件。
 
+### 数据生命周期
+
+- JobStore 支持按 `created_at` 年龄清理（默认 48h）和数量上限清理（默认 200）。
+- 导出文件支持按文件 mtime 清理（默认 3 天）和数量上限清理（默认 50）。
+- 清理脚本 `backend/scripts/cleanup.py`：`--all`, `--jobs`, `--exports`。
+- REST API 清理端点：`POST /health/cleanup/jobs`, `POST /health/cleanup/exports`。
+- 启动时自动清理：`main.py` 在 lifespan startup 中执行一次 cleanup。
+- 向后兼容：旧版 `jobs.jsonl`（无 `created_at`）加载时自动赋予 epoch-0，下次 cleanup 清除。
+
 ### 前端
 
 - 高德 JSAPI 地图渲染，按天分色路线 + 酒店标记 + InfoWindow 交互。
@@ -340,20 +456,29 @@ Invoke-RestMethod `
 
 最近一次检查结果：
 
-- 后端测试文件：`test_workflow.py`（1385 行）+ `test_mcp_server.py`（497 行）。
-- 功能覆盖：意图解析、Haversine、矩阵构建、聚类、路线求解、预算评估、预算替代策略（pruner）、几何生成与简化、导出（HTML/PDF/PNG）、Job 持久化与事件轮询、工作流运行与重规划、健康检查、运行时能力、集成探测、工作流拓扑、FastAPI 端点集成测试。
+- 后端测试文件：`test_workflow.py`（1385 行）+ `test_mcp_server.py`（497 行）+ `test_e2e_smoke.py`（260 行）。
+- 功能覆盖：意图解析、Haversine、矩阵构建、聚类、路线求解、预算评估、预算替代策略（pruner）、几何生成与简化、导出（HTML/PDF/PNG）、Job 持久化与事件轮询、工作流运行与重规划、健康检查、运行时能力、集成探测、工作流拓扑、FastAPI 端点集成测试、熔断/重试配置、数据清理 API、E2E 全链路冒烟。
 - 前端：`npx.cmd vue-tsc --noEmit` 通过。
-- 前端：`npx.cmd vite build --outDir ..\run-logs\frontend-build-check --emptyOutDir` 通过。
-- 前端默认 `npm.cmd run build` 可能因 `frontend/dist/assets` 权限失败。
+- 前端：`npm.cmd run build` 或 `npm.cmd run build:fallback` 构建通过。
 
 ## 后续更新计划
 
-### P0：稳定性与可交付修复
+### P0：稳定性与可交付修复 ✅
 
-- 修复 JobStore 默认写入路径权限问题，支持无法落盘时降级内存态或使用可配置 runtime 目录。
-- 清理 `frontend/dist` 权限/锁定问题，保证默认 `npm run build` 可重复成功。
-- 为 `.env` 增加示例文件，避免密钥和运行配置混乱。
-- 增加端到端 smoke test：parse → plan → budget → export → verify file on disk。
+- [x] 修复 JobStore 默认写入路径权限问题，支持无法落盘时降级内存态或使用可配置 runtime 目录。
+- [x] 为 `.env` 增加示例文件，避免密钥和运行配置混乱。
+- [x] 增加端到端 smoke test：parse → plan → budget → export → verify file on disk。
+- [x] **增加重试机制**：Amap/MCP/LLM 三个外部集成路径均支持指数退避重试（`retry_on_error()`）。
+- [x] **增加熔断器**：三个外部集成各自独立熔断状态，达到阈值快速失败。
+- [x] **增加数据生命周期管理**：JobStore 按年龄/数量清理、导出文件按天数/数量清理。
+- [x] **增加 `backend/scripts/cleanup.py`**：支持 `--all` / `--jobs` / `--exports`。
+- [x] **增加 health 清理 API**：`POST /health/cleanup/jobs`、`POST /health/cleanup/exports`。
+- [x] **增加启动时自动清理**：`main.py` lifespan startup 中执行一次 cleanup。
+- [x] **向后兼容**：旧版 `jobs.jsonl`（无 `created_at`）自动加载为 epoch-0。
+- [x] **修复 cleanup 不生效**：写对 `cleanup_old_jobs()` 中 age 比较逻辑（基于 `job.created_at` 而非 UUID1）。
+- [x] **修复 exports cleanup**：`resolve_backend_path("exports")` 正确映射到 `backend/exports`，默认保留期改为 3 天。
+- [x] **修复 `config.py` `resolve_backend_path` 不 resolve**：增加 `.resolve()` 规范化路径。
+- [x] **修复 Amap MCP Weather 解析失败**：新增 `amap_weather_forecast` MCP tool，直接通过 Amap REST API 的 `/weather/weatherInfo?extensions=all` 获取多日预报数据，三级降级策略确保天气事实始终可用。
 
 ### P1：真实数据质量
 

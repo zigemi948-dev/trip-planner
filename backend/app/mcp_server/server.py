@@ -64,6 +64,17 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             ["city"],
         ),
     },
+    "amap_weather_forecast": {
+        "description": "Fetch multi-day weather forecast from Amap.",
+        "inputSchema": _json_schema(
+            "object",
+            {
+                "city": {"type": "string"},
+                "days": {"type": "integer", "minimum": 1, "maximum": 7, "default": 3},
+            },
+            ["city"],
+        ),
+    },
     "finance_context": {
         "description": "Return default financial assumptions used by the route solver.",
         "inputSchema": _json_schema("object", {}),
@@ -126,6 +137,15 @@ def _call_amap_weather_constraints(arguments: dict[str, Any]) -> Any:
     return weather_constraints_tool(str(arguments["city"]))
 
 
+def _call_amap_weather_forecast(arguments: dict[str, Any]) -> Any:
+    from app.mcp_server.amap_tools import weather_forecast_tool
+
+    return weather_forecast_tool(
+        city=str(arguments["city"]),
+        days=int(arguments.get("days", 3)),
+    )
+
+
 def _call_finance_context(arguments: dict[str, Any]) -> Any:
     return finance_context_tool()
 
@@ -145,6 +165,7 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "amap_hotel_anchor": _call_amap_hotel_anchor,
     "amap_distance_matrix": _call_amap_distance_matrix,
     "amap_weather_constraints": _call_amap_weather_constraints,
+    "amap_weather_forecast": _call_amap_weather_forecast,
     "finance_context": _call_finance_context,
     "llm_complete_text": _call_llm_complete_text,
 }
