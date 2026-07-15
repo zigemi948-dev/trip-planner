@@ -13,3 +13,4 @@ backend/.test-jobs/
 backend/test-output/
 .DS_Store
 frontend/.env.local
+Constitution.md

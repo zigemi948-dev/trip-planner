@@ -11,7 +11,6 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-
 def create_app() -> FastAPI:
     """Create the FastAPI application and register transport adapters.
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -366,6 +366,21 @@ class ReplanRequest(BaseModel):
     new_poi: POICandidate
 
 
+class SavedTripReplanRequest(BaseModel):
+    """Replan the current persisted version with optimistic concurrency."""
+
+    day: int = Field(ge=1)
+    new_poi: POICandidate
+    expected_version_id: UUID | None = None
+
+
+class SavedTripExportRequest(BaseModel):
+    """Export a persisted trip without resubmitting its full solution."""
+
+    export_format: str = Field(default="html", pattern="^(html|pdf|png)$")
+    map_snapshot_base64: str | None = None
+
+
 class ExportRequest(BaseModel):
     """Request to render a route solution into a portable payload."""
 
@@ -390,6 +405,7 @@ class PlanningJob(BaseModel):
     state: TripState | None = None
     events: list[dict[str, Any]] = Field(default_factory=list)
     error: str = ""
+    saved_trip_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -411,3 +427,4 @@ class PlanningJobEvents(BaseModel):
     events: list[dict[str, Any]] = Field(default_factory=list)
     next_offset: int = 0
     state: TripState | None = None
+    saved_trip_id: str | None = None

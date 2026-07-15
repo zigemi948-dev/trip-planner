@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import {
   checkHealth,
   exportTrip,
-  exportTripFile,
+  exportSavedTripFile,
   fetchPlanningJobEvents,
   listPlanningJobs,
   loadRuntimeCapabilities,
@@ -11,6 +11,8 @@ import {
   planTrip,
   probeIntegrations,
   replanTrip,
+  replanSavedTrip,
+  saveTrip,
   streamTripPlan,
   submitPlanningJob,
   type PlanTripRequest,
@@ -36,6 +38,7 @@ export const useTripStore = defineStore('trip', {
     error: '',
     exportPayload: null as Record<string, string> | null,
     activeJob: null as PlanningJob | null,
+    savedTripId: null as string | null,
     jobs: [] as PlanningJobSummary[],
     health: null as HealthResponse | null,
     capabilities: null as RuntimeCapabilities | null,
@@ -82,6 +85,7 @@ export const useTripStore = defineStore('trip', {
       this.error = '';
       try {
         this.trip = await loadDemoTrip();
+        this.savedTripId = null;
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
@@ -115,6 +119,7 @@ export const useTripStore = defineStore('trip', {
       this.error = '';
       try {
         this.trip = await planTrip(payload);
+        this.savedTripId = null;
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
@@ -130,6 +135,7 @@ export const useTripStore = defineStore('trip', {
         this.trip = await streamTripPlan(payload, (event) => {
           this.streamEvents.push(event);
         });
+        this.savedTripId = null;
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
@@ -144,11 +150,16 @@ export const useTripStore = defineStore('trip', {
       this.loading = true;
       this.error = '';
       try {
-        this.trip = await replanTrip({
-          state: this.trip,
-          day,
-          new_poi: newPoi
-        });
+        if (this.savedTripId) {
+          const result = await replanSavedTrip(this.savedTripId, day, newPoi);
+          this.trip = result.state;
+        } else {
+          this.trip = await replanTrip({
+            state: this.trip,
+            day,
+            new_poi: newPoi
+          });
+        }
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
@@ -178,7 +189,11 @@ export const useTripStore = defineStore('trip', {
       this.loading = true;
       this.error = '';
       try {
-        this.exportPayload = await exportTripFile(this.trip.routing_solution, format, mapSnapshot);
+        if (!this.savedTripId) {
+          const saved = await saveTrip(this.trip);
+          this.savedTripId = saved.id;
+        }
+        this.exportPayload = await exportSavedTripFile(this.savedTripId, format, mapSnapshot);
       } catch (error) {
         this.error = error instanceof Error ? error.message : 'Unknown error';
       } finally {
@@ -190,6 +205,7 @@ export const useTripStore = defineStore('trip', {
       this.loading = true;
       this.error = '';
       this.streamEvents = [];
+      this.savedTripId = null;
       try {
         const job = await submitPlanningJob(payload);
         this.activeJob = job;
@@ -236,8 +252,12 @@ export const useTripStore = defineStore('trip', {
           ...this.activeJob,
           status: eventWindow.status,
           events: [...this.activeJob.events, ...eventWindow.events],
-          state: eventWindow.state ?? this.activeJob.state
+          state: eventWindow.state ?? this.activeJob.state,
+          saved_trip_id: eventWindow.saved_trip_id ?? this.activeJob.saved_trip_id
         };
+      }
+      if (eventWindow.saved_trip_id) {
+        this.savedTripId = eventWindow.saved_trip_id;
       }
       if (eventWindow.state) {
         this.trip = eventWindow.state;

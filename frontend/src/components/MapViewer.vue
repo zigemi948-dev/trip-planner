@@ -414,7 +414,7 @@ async function exportMapSnapshot(): Promise<string | null> {
       useCORS: true, // 允许加载跨域的地图瓦片资源
       allowTaint: false,
       backgroundColor: null // 保持原有背景
-    });
+    } as unknown as Parameters<typeof html2canvas>[1]);
     return canvas.toDataURL('image/png');
   } catch (error) {
     console.error('地图快照生成失败:', error);

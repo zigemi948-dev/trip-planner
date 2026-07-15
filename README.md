@@ -1,4 +1,23 @@
-# Trip Planner
+# 智能旅行规划系统
+
+## PostgreSQL 持久化（当前实现）
+
+项目默认使用 PostgreSQL 持久化。配置 `DATABASE_URL` 后，保持
+`TRIP_PERSISTENCE_BACKEND=database`（默认值）即可启用。规划任务、增量事件、
+最终 `TripState` 快照、行程、不可变版本、每日行程和站点都会写入数据库。
+`jsonl` 仅保留为 `TRIP_PERSISTENCE_BACKEND=jsonl` 的测试与临时兼容回退模式，
+不再作为生产主存储。
+
+- 核心表：`planning_jobs`、`planning_job_events`、`trips`、`trip_versions`、`trip_days`、`trip_stops`、`trip_exports`。
+- 任务完成后自动创建已保存行程及首个不可变版本；保存行程重规划会追加新版本，并以 `expected_version_id` 防止并发覆盖。
+- 保存行程导出会绑定实际渲染的版本，并在 `trip_exports` 登记格式、路径、大小、状态和过期时间。
+- UI 的 `Export File` 会自动保存尚无数据库身份的当前 `TripState`，然后调用保存行程导出接口；数据库 Job 结果直接复用返回的 `saved_trip_id`。
+- 初始迁移会将早期原型表 `trips`、`routes` 无损重命名为 `legacy_trips`、`legacy_routes`，不直接删除旧数据。
+- 原有任务轮询与无状态重规划/导出接口保持兼容；已保存行程另有查询、版本化重规划和导出历史接口。
+- 所有后端命令必须在虚拟环境执行。进入 `backend` 后运行
+  `python -m alembic -c alembic.ini upgrade head` 应用迁移。
+- PostgreSQL 集成测试为显式开启：设置 `TRIP_RUN_DB_INTEGRATION=true` 后执行
+  `python -m pytest tests/test_postgres_integration.py -q`。
 
 智能旅行规划助手。将自然语言旅行需求转成可执行的多日路线，在预算、时间窗、天气、交通方式和地图事实约束下生成可解释行程。
 
@@ -10,14 +29,14 @@
 
 - MVP 演示完成度：约 90%（新增重试、熔断、数据生命周期管理、E2E smoke test、向后兼容数据迁移）。
 - 生产级完成度：约 75%。
-- 后端测试用例：`1500+` 行测试（含 E2E smoke test ~260 行），覆盖工作流、MCP 服务器、意图解析、聚类、矩阵构建、路线求解、预算评估与修复、预算替代策略、几何生成与简化、导出多格式、Job 持久化与事件轮询、健康检查、集成探测、工作流拓扑、熔断/重试配置、数据清理 API。
+- 后端测试用例：`1500+` 行测试（含 E2E smoke test ~260 行），覆盖工作流、MCP 服务器、意图解析、聚类、矩阵构建、路线求解、预算评估与修复、预算替代策略、几何生成与简化、导出多格式、Job 持久化与事件轮询、行程版本追加、并发冲突、导出登记、健康检查、集成探测、工作流拓扑、熔断/重试配置、数据清理 API。
 - 前端类型检查通过；Vite 构建成功（含 `emptyOutDir` 权限兼容）。
-- JobStore 持久化失败时自动降级内存态；健康检查端点可感知持久化异常。
+- 默认数据库任务存储会将持久化异常暴露给健康检查和调用方；仅 JSONL 回退模式在文件写入失败时保留内存态。
 - 提供 `.env.example` 配置模板。
 - **重试机制**：高德 Amap REST / MCP / LLM 三个外部集成路径均支持指数退避重试。
 - **熔断器**：三个外部集成各自独立熔断状态实例，达到连续失败阈值后快速失败避免级联。
-- **数据生命周期**：JobStore 支持按年龄和数量清理，导出文件支持按天数和数量清理；提供 CLI 清理脚本和 REST API 端点。
-- **向后兼容**：旧版 `jobs.jsonl`（无 `created_at` 字段）加载时自动赋予 epoch-0 时间戳，下一次 cleanup 即清除。
+- **数据生命周期**：数据库任务按年龄和数量清理，导出文件按天数和数量清理；文件删除后同步把 `trip_exports.status` 更新为 `expired`，对账发现文件异常缺失时更新为 `missing`。
+- **向后兼容**：仅 JSONL 回退模式下，旧版 `jobs.jsonl`（无 `created_at` 字段）加载时自动赋予 epoch-0 时间戳，下一次 cleanup 即清除。
 
 核心链路可用：
 
@@ -31,10 +50,10 @@
 
 - 高德价格字段已接入，但酒店房态、景点门票和餐饮实时成交价不是全量真实价格。
 - 高德 REST 或 MCP 方向服务可回填道路 polyline；缺失时仍降级为后端插值连线。
-- 前端重规划目前是通过固定按钮插入示例 POI，不是拖拽交互。
+- 后端已支持保存行程的版本化重规划；前端目前仍通过固定按钮插入示例 POI，尚未接入拖拽及保存版本冲突处理。
 - WebSocket 已推送工作流阶段事件；前端展示仍偏轻量。
 - HTML/PDF/PNG 导出已实现；PDF 依赖 weasyprint，PNG 依赖 playwright，缺失时使用占位文件兜底。
-- `backend/data/jobs.jsonl` 在部分 Windows 权限环境下可能无法落盘；Job 会保留在内存中，重启恢复需要配置可写路径。
+- `backend/data/jobs.jsonl` 仅在 JSONL 回退模式使用；该模式写入失败时任务仅保留在内存中，重启后不会恢复。
 
 ## 技术栈
 
@@ -66,13 +85,16 @@ trip-planner/
 │   │   ├── agents/            # intent / attraction / hotel / weather / finance / planner
 │   │   ├── algorithms/        # clustering / matrix / VRP solver / budget / geometry / geo / observability
 │   │   ├── api/               # http_router / ws_router / health_router / error_handlers
-│   │   ├── core/              # config / exceptions
+│   │   ├── core/              # config / database / exceptions
+│   │   ├── persistence/       # SQLAlchemy models and repositories
 │   │   ├── graph/             # LangGraph state, nodes, edges, workflow
 │   │   ├── mcp_server/        # project-local MCP tools
 │   │   └── services/          # amap, geo_facts, matrix, cache, jobs, export, LLM, MCP client,
 │   │                          # http_client (重试+熔断), integration_probe, provider_adapters
-│   ├── data/                  # jobs.jsonl（JobStore 持久化）
+│   ├── data/                  # jobs.jsonl（仅测试/兼容回退）
 │   ├── exports/               # 导出文件（HTML/PDF/PNG）
+│   ├── migrations/            # Alembic PostgreSQL schema revisions
+│   ├── alembic.ini            # Alembic configuration
 │   ├── scripts/               # demo / run_mcp / run_mcp_http / cleanup
 │   └── tests/                 # conftest, test_workflow (~1385 lines), test_mcp_server (~497 lines), test_e2e_smoke (~260 lines)
 └── frontend/
@@ -90,8 +112,10 @@ trip-planner/
 ### 1. 后端
 
 ```powershell
+conda activate open_ai
 cd backend
 python -m pip install -r requirements.txt
+python -m alembic -c alembic.ini upgrade head
 uvicorn app.main:app --reload
 ```
 
@@ -252,7 +276,7 @@ $env:TRIP_EXPORT_CLEANUP_MAX_AGE_DAYS="3"
 $env:TRIP_EXPORT_CLEANUP_MAX_FILES="50"
 ```
 
-**向后兼容**：旧版 `jobs.jsonl` 中没有 `created_at` 字段的记录在加载时自动赋予 epoch-0 时间戳，首次 cleanup 即会清除，无需手动干预。
+**向后兼容**：JSONL 回退模式下，旧版 `jobs.jsonl` 中没有 `created_at` 字段的记录在加载时自动赋予 epoch-0 时间戳，首次 cleanup 即会清除，无需手动干预。
 
 ## 常用命令
 
@@ -325,10 +349,10 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/health/cleanup/exports
 
 ### 健康检查
 
-- `GET /health`：应用存活状态（含 JobStore 持久化状态警告）。
+- `GET /health`：应用存活状态（含任务存储持久化状态警告）。
 - `GET /health/capabilities`：运行时能力（provider_mode, amap_enabled, llm_enabled 等）。
 - `GET /health/integrations/probe`：对外部集成（高德/LLM）执行实时探测。
-- `GET /health/job-store`：JobStore 持久化状态和任务计数。
+- `GET /health/job-store`：任务存储持久化状态和任务计数。
 - `POST /health/cleanup/jobs`：清理旧/过多的规划任务。
 - `POST /health/cleanup/exports`：清理旧/过多的导出文件。
 
@@ -341,6 +365,12 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/health/cleanup/exports
 - `POST /api/trips/export`：返回 HTML/PDF/PNG 导出 payload。
 - `POST /api/trips/export/file`：写出导出文件到服务端磁盘。
 - `GET /api/trips/workflow/topology`：工作流拓扑（Map-Compute-Reduce 节点与边）。
+- `GET /api/trips/saved`：查询已保存行程摘要。
+- `POST /api/trips/saved`：保存一个完整 `TripState`，供 UI 的版本化重规划和导出使用。
+- `GET /api/trips/saved/{trip_id}`：读取当前不可变版本及完整 `TripState`。
+- `POST /api/trips/saved/{trip_id}/replan`：基于当前版本重规划并追加新版本；可传 `expected_version_id`，版本已变化时返回 409。
+- `POST /api/trips/saved/{trip_id}/export/file`：导出当前版本并登记产物元数据。
+- `GET /api/trips/saved/{trip_id}/exports`：查询该行程全部版本的导出历史。
 
 ### Job 轮询（前缀 `/api`）
 
@@ -429,15 +459,18 @@ Invoke-RestMethod `
 - PDF 导出：weasyprint（可选），失败时生成最小占位 PDF。
 - PNG 导出：playwright（可选），截取全页面长图，失败时生成占位图。
 - 地图快照注入：前端 html2canvas → base64 data URI → 嵌入导出文件。
+- 保存行程导出绑定 `trip_version_id`，并将路径、内容类型、文件大小、状态及过期时间写入 `trip_exports`。
+- 前端 `Export File` 不再调用无状态文件接口：没有 `saved_trip_id` 时先自动保存当前行程，有 ID 时直接导出对应数据库版本。
 
 ### 数据生命周期
 
-- JobStore 支持按 `created_at` 年龄清理（默认 48h）和数量上限清理（默认 200）。
+- 数据库任务存储支持按 `created_at` 年龄清理（默认 48h）和数量上限清理（默认 200）。
 - 导出文件支持按文件 mtime 清理（默认 3 天）和数量上限清理（默认 50）。
+- 每次清理都会对账当前清理目录内的 `ready` 记录：被清理或到期的记录改为 `expired`，文件意外缺失的记录改为 `missing`；该过程可重复执行。
 - 清理脚本 `backend/scripts/cleanup.py`：`--all`, `--jobs`, `--exports`。
 - REST API 清理端点：`POST /health/cleanup/jobs`, `POST /health/cleanup/exports`。
 - 启动时自动清理：`main.py` 在 lifespan startup 中执行一次 cleanup。
-- 向后兼容：旧版 `jobs.jsonl`（无 `created_at`）加载时自动赋予 epoch-0，下次 cleanup 清除。
+- 向后兼容：仅 JSONL 回退模式下，旧版 `jobs.jsonl`（无 `created_at`）加载时自动赋予 epoch-0，下次 cleanup 清除。
 
 ### 前端
 
@@ -479,6 +512,10 @@ Invoke-RestMethod `
 - [x] **修复 exports cleanup**：`resolve_backend_path("exports")` 正确映射到 `backend/exports`，默认保留期改为 3 天。
 - [x] **修复 `config.py` `resolve_backend_path` 不 resolve**：增加 `.resolve()` 规范化路径。
 - [x] **修复 Amap MCP Weather 解析失败**：新增 `amap_weather_forecast` MCP tool，直接通过 Amap REST API 的 `/weather/weatherInfo?extensions=all` 获取多日预报数据，三级降级策略确保天气事实始终可用。
+- [x] **补齐保存行程版本边界**：重规划追加不可变 `trip_versions`，使用行锁与 `expected_version_id` 检测并发覆盖。
+- [x] **补齐导出持久化边界**：保存行程导出写入 `trip_exports`，并提供导出历史查询接口。
+- [x] **修复 UI 导出登记**：`Export File` 自动建立/复用 `saved_trip_id`，统一调用版本绑定导出接口。
+- [x] **同步导出清理状态**：文件清理后更新 `trip_exports.status`，并对异常缺失文件标记 `missing`。
 
 ### P1：真实数据质量
 
@@ -497,7 +534,7 @@ Invoke-RestMethod `
 ### P3：导出增强
 
 - 导出中加入更详细的地图截图（高德截图而非 HTML Canvas 快照）。
-- 支持导出文件历史列表和管理。
+- 为导出历史增加下载和用户主动删除管理（当前已支持元数据列表及清理状态同步）。
 - 移除 PDF/PNG 对 weasyprint/playwright 的可选依赖提为强依赖或提供安装脚本。
 
 ### P4：算法增强

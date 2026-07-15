@@ -402,17 +402,18 @@ def cleanup_old_exports(
     count_limit = max_files or settings.export_cleanup_max_files
     directory = resolve_backend_path(export_dir)
 
-    if not directory.exists():
-        return 0
-
     now = time_module.time()
     cutoff = now - (age_limit * 86400)
     removed = 0
 
     # Collect all export files sorted by modification time (oldest first)
-    export_files = sorted(
-        [p for p in directory.iterdir() if p.is_file()],
-        key=lambda p: p.stat().st_mtime,
+    export_files = (
+        sorted(
+            [p for p in directory.iterdir() if p.is_file()],
+            key=lambda p: p.stat().st_mtime,
+        )
+        if directory.exists()
+        else []
     )
 
     # 1. Remove by age
@@ -431,14 +432,27 @@ def cleanup_old_exports(
         files_to_remove.extend(export_files[:overflow])
 
     # 3. Delete
+    removed_paths: set[Path] = set()
     for path in files_to_remove:
         try:
             path.unlink()
             removed += 1
+            removed_paths.add(path.resolve())
             _logger.debug("Removed stale export: %s", path)
         except OSError:
             pass
 
     if removed:
         _logger.info("Export cleanup: removed %d files (age>%dd or count>%d)", removed, age_limit, count_limit)
+
+    if settings.persistence_backend == "database":
+        from app.services.trip_service import trip_service
+
+        synchronized = trip_service.reconcile_export_statuses(directory, removed_paths)
+        if any(synchronized.values()):
+            _logger.info(
+                "Export cleanup: synchronized database statuses (expired=%d, missing=%d)",
+                synchronized["expired"],
+                synchronized["missing"],
+            )
     return removed

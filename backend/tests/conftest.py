@@ -10,3 +10,6 @@ sys.path.insert(0, str(BACKEND_ROOT))
 # in .env. Integration smoke tests can opt into remote providers separately.
 os.environ["TRIP_PROVIDER_MODE"] = "local"
 os.environ["TRIP_LLM_ENABLED"] = "false"
+# Unit and workflow tests exercise the JSONL implementation explicitly.  The
+# database integration suite uses a dedicated PostgreSQL database instead.
+os.environ["TRIP_PERSISTENCE_BACKEND"] = "jsonl"

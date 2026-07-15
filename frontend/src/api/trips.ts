@@ -8,6 +8,8 @@ import type {
   ReplanRequest,
   RoutingSolution,
   RuntimeCapabilities,
+  SavedTrip,
+  SavedTripReplanResult,
   TripState,
   WorkflowEvent
 } from '../types/trip';
@@ -121,6 +123,53 @@ export async function exportTripFile(
     throw new Error(`Export file request failed: ${response.status}`);
   }
 
+  return response.json();
+}
+
+export async function saveTrip(state: TripState): Promise<SavedTrip> {
+  const response = await fetch(`${API_BASE}/trips/saved`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(state)
+  });
+  if (!response.ok) {
+    throw new Error(`Save trip request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function replanSavedTrip(
+  tripId: string,
+  day: number,
+  newPoi: ReplanRequest['new_poi']
+): Promise<SavedTripReplanResult> {
+  const response = await fetch(`${API_BASE}/trips/saved/${tripId}/replan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ day, new_poi: newPoi })
+  });
+  if (!response.ok) {
+    throw new Error(`Saved replan request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function exportSavedTripFile(
+  tripId: string,
+  exportFormat: ExportFormat = 'html',
+  mapSnapshotBase64?: string | null
+): Promise<Record<string, string>> {
+  const response = await fetch(`${API_BASE}/trips/saved/${tripId}/export/file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      export_format: exportFormat,
+      map_snapshot_base64: mapSnapshotBase64
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Saved export file request failed: ${response.status}`);
+  }
   return response.json();
 }
 

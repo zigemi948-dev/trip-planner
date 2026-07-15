@@ -194,6 +194,7 @@ export interface PlanningJob {
   state: TripState | null;
   events: Array<{ event: string; payload: Record<string, unknown> }>;
   error: string;
+  saved_trip_id: string | null;
 }
 
 export interface PlanningJobSummary {
@@ -210,4 +211,19 @@ export interface PlanningJobEvents {
   events: WorkflowEvent[];
   next_offset: number;
   state: TripState | null;
+  saved_trip_id: string | null;
+}
+
+export interface SavedTrip {
+  id: string;
+  current_version_id: string;
+  revision: number;
+  state: TripState;
+}
+
+export interface SavedTripReplanResult {
+  trip_id: string;
+  version_id: string;
+  revision: number;
+  state: TripState;
 }

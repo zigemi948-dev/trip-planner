@@ -60,6 +60,12 @@ class Settings(BaseModel):
     amap_mcp_matrix_tool: str = "amap_distance_matrix"
     matrix_cache_ttl_seconds: int = 3600
     job_store_path: str = "data/jobs.jsonl"
+    persistence_backend: str = "database"
+    database_url: str = ""
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout_seconds: int = 30
+    db_connect_timeout_seconds: int = 5
     unsplash_access_key: str = ""
     # --- 重试与熔断配置 ---
     amap_retry_max_attempts: int = 3
@@ -126,6 +132,12 @@ settings = Settings(
     amap_mcp_matrix_tool=os.getenv("TRIP_AMAP_MCP_MATRIX_TOOL", "amap_distance_matrix"),
     matrix_cache_ttl_seconds=int(os.getenv("TRIP_MATRIX_CACHE_TTL_SECONDS", "3600")),
     job_store_path=os.getenv("TRIP_JOB_STORE_PATH", "data/jobs.jsonl"),
+    persistence_backend=os.getenv("TRIP_PERSISTENCE_BACKEND", "database").strip().lower(),
+    database_url=os.getenv("DATABASE_URL", ""),
+    db_pool_size=int(os.getenv("TRIP_DB_POOL_SIZE", "5")),
+    db_max_overflow=int(os.getenv("TRIP_DB_MAX_OVERFLOW", "10")),
+    db_pool_timeout_seconds=int(os.getenv("TRIP_DB_POOL_TIMEOUT_SECONDS", "30")),
+    db_connect_timeout_seconds=int(os.getenv("TRIP_DB_CONNECT_TIMEOUT_SECONDS", "5")),
     unsplash_access_key=os.getenv("UNSPLASH_ACCESS_KEY", ""),
     amap_retry_max_attempts=int(os.getenv("TRIP_AMAP_RETRY_MAX_ATTEMPTS", "3")),
     amap_retry_base_delay_ms=int(os.getenv("TRIP_AMAP_RETRY_BASE_DELAY_MS", "500")),
